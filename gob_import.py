@@ -20,7 +20,7 @@ import os
 import random
 import string
 import time
-from struct import unpack, unpack_from
+from struct import unpack_from
 
 import bmesh
 import bpy
@@ -64,6 +64,7 @@ def _read_goz_section(goz_file, operator, section_name):
             operator,
             f"{section_name} section has a truncated header; the section was ignored.",
         )
+        goz_file.seek(0, 2)
         return 0, b""
 
     section_length = unpack_from("<I", header, 0)[0]
@@ -74,6 +75,7 @@ def _read_goz_section(goz_file, operator, section_name):
             f"{section_name} section has an invalid length ({section_length}); "
             "the section was ignored.",
         )
+        goz_file.seek(0, 2)
         return element_count, b""
 
     payload_length = section_length - 16
@@ -90,6 +92,211 @@ def _read_goz_section(goz_file, operator, section_name):
         )
 
     return element_count, payload
+
+
+def _read_length_prefixed_goz_section(
+    goz_file, operator, section_name, *, read_payload=True
+):
+    """Read a GoZ section whose length follows its already-consumed tag."""
+
+    length_data = goz_file.read(4)
+    if len(length_data) != 4:
+        _report_import_warning(
+            operator,
+            f"{section_name} section has a truncated length field; the rest "
+            "of the object was ignored.",
+        )
+        goz_file.seek(0, 2)
+        return None
+
+    section_length = unpack_from("<I", length_data, 0)[0]
+    if section_length < 8:
+        _report_import_warning(
+            operator,
+            f"{section_name} section has an invalid length ({section_length}); "
+            "the rest of the object was ignored.",
+        )
+        goz_file.seek(0, 2)
+        return None
+
+    payload_length = section_length - 8
+    payload_start = goz_file.tell()
+    goz_file.seek(0, 2)
+    file_end = goz_file.tell()
+    available_bytes = max(0, file_end - payload_start)
+    goz_file.seek(payload_start, 0)
+
+    if payload_length > available_bytes:
+        _report_import_warning(
+            operator,
+            f"{section_name} section is truncated: expected {payload_length} "
+            f"payload bytes, found {available_bytes}; the rest of the object "
+            "was ignored.",
+        )
+        goz_file.seek(file_end, 0)
+        return None
+
+    if read_payload:
+        return goz_file.read(payload_length)
+
+    goz_file.seek(payload_length, 1)
+    return b""
+
+
+def _skip_unknown_goz_section(goz_file, operator, tag, section_name):
+    """Skip an unfamiliar length-prefixed GoZ section safely.
+
+    The caller has already consumed the four-byte tag. Generic GoZ section
+    lengths include both the tag and the following four-byte length field, so
+    the unread portion is ``section_length - 8`` bytes.
+    """
+
+    tag_name = tag.hex()
+    payload = _read_length_prefixed_goz_section(
+        goz_file,
+        operator,
+        f"Unknown {section_name} tag {tag_name}",
+        read_payload=False,
+    )
+    return payload is not None
+
+
+def _read_goz_object_name(goz_file, operator):
+    """Read and validate the mandatory object-name record at the file start."""
+
+    file_header = goz_file.read(36)
+    if len(file_header) != 36:
+        _report_import_warning(
+            operator,
+            "Object header is truncated; the object was not imported.",
+        )
+        return None
+
+    payload = _read_length_prefixed_goz_section(
+        goz_file, operator, "Object name"
+    )
+    if payload is None:
+        return None
+    if len(payload) < 16:
+        _report_import_warning(
+            operator,
+            "Object name section is too short; the object was not imported.",
+        )
+        return None
+
+    name_record = payload[8:]
+    if not name_record.startswith(b"GoZMesh_"):
+        _report_import_warning(
+            operator,
+            "Object name section has an invalid prefix; the object was not imported.",
+        )
+        return None
+
+    name_bytes = name_record[len(b"GoZMesh_") :]
+    try:
+        decoded_name = name_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        _report_import_warning(
+            operator,
+            "Object name contains invalid UTF-8; unsupported bytes were ignored.",
+        )
+        decoded_name = name_bytes.decode("utf-8", errors="ignore")
+
+    object_name = "".join(
+        letter for letter in decoded_name if letter in string.printable
+    ).strip("\x00")
+    if not object_name:
+        _report_import_warning(
+            operator,
+            "Object name is empty; the object was not imported.",
+        )
+        return None
+    return object_name
+
+
+def _read_goz_subdivision_level(goz_file, operator):
+    """Read subdivision records and return the last recorded level."""
+
+    count, payload = _read_goz_section(goz_file, operator, "Subdivision")
+    record_size = 4 * 4
+    payload_record_count = len(payload) // record_size
+    trailing_byte_count = len(payload) % record_size
+    import_record_count = min(count, payload_record_count)
+    if payload_record_count != count or trailing_byte_count:
+        _report_import_warning(
+            operator,
+            "Subdivision data is partial or inconsistent: the section "
+            f"declares {count} records and its payload contains "
+            f"{payload_record_count} complete records.",
+        )
+
+    if not import_record_count:
+        return 0
+
+    records = np.frombuffer(
+        payload, dtype="<u4", count=import_record_count * 4
+    ).reshape((-1, 4))
+    return int(records[-1, 0])
+
+
+def _read_goz_texture_path(goz_file, operator, texture_type):
+    """Read and decode a texture path while preserving section alignment."""
+
+    payload = _read_length_prefixed_goz_section(
+        goz_file, operator, f"{texture_type} texture"
+    )
+    if payload is None:
+        return None
+    if len(payload) < 8:
+        _report_import_warning(
+            operator,
+            f"{texture_type} texture section is too short; the texture was ignored.",
+        )
+        return None
+
+    path_bytes = payload[8:].rstrip(b"\x00")
+    try:
+        texture_path = path_bytes.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        _report_import_warning(
+            operator,
+            f"{texture_type} texture path is not valid UTF-8; the texture was ignored.",
+        )
+        return None
+
+    if not texture_path:
+        _report_import_warning(
+            operator,
+            f"{texture_type} texture path is empty; the texture was ignored.",
+        )
+        return None
+    return texture_path
+
+
+def _load_goz_texture(goz_file, operator, texture_type, texture_name):
+    """Load one texture section without allowing it to abort mesh import."""
+
+    texture_path = _read_goz_texture_path(goz_file, operator, texture_type)
+    if texture_path is None:
+        return None
+
+    try:
+        image = bpy.data.images.load(texture_path, check_existing=True)
+        image.name = texture_name
+        image.reload()
+    except (OSError, RuntimeError, ValueError) as error:
+        _report_import_warning(
+            operator,
+            f"{texture_type} texture could not be loaded from "
+            f"'{texture_path}': {error}",
+        )
+        return None
+
+    texture = bpy.data.textures.get(texture_name)
+    if texture is None:
+        texture = bpy.data.textures.new(texture_name, "IMAGE")
+    texture.image = image
+    return image
 
 
 def _decode_face_data(faces_data):
@@ -312,7 +519,6 @@ class GoB_OT_import(Operator):
             start_time = utils.profiler(time.perf_counter(), "Start Object Profiling")
             start_total_time = utils.profiler(time.perf_counter(), "...")
 
-        unknown_tag = 0
         vertsData = np.empty((0, 3), dtype=np.float32)
         facesData = np.empty((0, 4), dtype=np.uint32)
         subdiv = 0
@@ -325,18 +531,9 @@ class GoB_OT_import(Operator):
             return
 
         with open(pathFile, "rb") as goz_file:
-            goz_file.seek(36, 0)
-            lenObjName = unpack("<I", goz_file.read(4))[0] - 16
-            goz_file.seek(8, 1)
-            obj_name = unpack("%ss" % lenObjName, goz_file.read(lenObjName))[0]
-            # remove non ascii chars eg. /x 00
-            objName = "".join(
-                [
-                    letter
-                    for letter in obj_name[8:].decode("utf-8")
-                    if letter in string.printable
-                ]
-            )
+            objName = _read_goz_object_name(goz_file, self)
+            if objName is None:
+                return
 
             if utils.prefs().debug_output:
                 print(f"\n\nGoB Importing: \n{pathFile, objName}")
@@ -349,24 +546,22 @@ class GoB_OT_import(Operator):
                 if tag == b"\x89\x13\x00\x00":
                     if utils.prefs().debug_output:
                         print("_ Name:", tag)
-                    cnt = unpack("<L", goz_file.read(4))[0] - 8
-                    goz_file.seek(cnt, 1)
+                    if (
+                        _read_length_prefixed_goz_section(
+                            goz_file, self, "Mesh name"
+                        )
+                        is None
+                    ):
+                        return
                     if utils.prefs().performance_profiling:
                         start_time = utils.profiler(start_time, "____Unpack Mesh Name")
 
                 # Subdivision Levels
                 elif tag == b"\x8a\x13\x00\x00":
-                    goz_file.seek(4, 1)
-                    cnt = unpack("<Q", goz_file.read(8))[0]
+                    subdiv = _read_goz_subdivision_level(goz_file, self)
                     if utils.prefs().debug_output:
-                        print("_ Subdivision Level 8a13 cnt: ", cnt)
                         print("_ Subdivision Level 8a13:", tag)
-                    for i in range(cnt):
-                        subdiv = unpack("<I", goz_file.read(4))[0]
-                        v2 = unpack("<I", goz_file.read(4))[0]
-                        v3 = unpack("<I", goz_file.read(4))[0]
-                        v4 = unpack("<I", goz_file.read(4))[0]
-                        print("_ _ Subdivision Level 8a13: ", subdiv, v2, v3, v4)
+                        print("_ _ Subdivision Level 8a13: ", subdiv)
 
                 # Vertices
                 elif tag == b"\x11\x27\x00\x00":
@@ -462,12 +657,10 @@ class GoB_OT_import(Operator):
                 else:
                     if utils.prefs().debug_output:
                         print("____ Unknown tag:{0}".format(tag))
-                    if unknown_tag >= 10:
-                        if utils.prefs().debug_output:
-                            print("...Too many mesh tags unknown...\n")
-                        unknown_tag += 1
-                        cnt = unpack("<I", goz_file.read(4))[0] - 8
-                        goz_file.seek(cnt, 1)
+                    if not _skip_unknown_goz_section(
+                        goz_file, self, tag, "mesh"
+                    ):
+                        tag = b""
                         break
 
                 tag = goz_file.read(4)
@@ -478,8 +671,6 @@ class GoB_OT_import(Operator):
             obj, me = self.make_mesh(objName, vertsData, facesData)
             if utils.prefs().performance_profiling:
                 start_time = utils.profiler(start_time, "Make Mesh \n")
-
-            unknown_tag = 0
 
             while tag:
                 # UVs
@@ -1003,74 +1194,36 @@ class GoB_OT_import(Operator):
                     if utils.prefs().debug_output:
                         print("Diff map:", tag)
                     texture_name = obj.name + utils.prefs().import_diffuse_suffix
-                    cnt = unpack("<I", goz_file.read(4))[0] - 16
-                    goz_file.seek(8, 1)
-                    diffName = unpack("%ss" % cnt, goz_file.read(cnt))[0]
-                    if utils.prefs().debug_output:
-                        print(diffName.decode("utf-8"))
-                    img = bpy.data.images.load(
-                        diffName.strip().decode("utf-8"), check_existing=True
+                    diff_texture = _load_goz_texture(
+                        goz_file, self, "Diffuse", texture_name
                     )
-                    img.name = texture_name
-                    img.reload()
-
-                    if not texture_name in bpy.data.textures:
-                        txtDiff = bpy.data.textures.new(texture_name, "IMAGE")
-                        txtDiff.image = img
-                    diff_texture = img
 
                 # Displacement Texture
                 elif tag == b"\xd9\xd6\x00\x00":
                     if utils.prefs().debug_output:
                         print("Disp map:", tag)
                     texture_name = obj.name + utils.prefs().import_displace_suffix
-                    cnt = unpack("<I", goz_file.read(4))[0] - 16
-                    goz_file.seek(8, 1)
-                    dispName = unpack("%ss" % cnt, goz_file.read(cnt))[0]
-                    if utils.prefs().debug_output:
-                        print(dispName.decode("utf-8"))
-                    img = bpy.data.images.load(
-                        dispName.strip().decode("utf-8"), check_existing=True
+                    disp_texture = _load_goz_texture(
+                        goz_file, self, "Displacement", texture_name
                     )
-                    img.name = texture_name
-                    img.reload()
-
-                    if not texture_name in bpy.data.textures:
-                        txtDisp = bpy.data.textures.new(texture_name, "IMAGE")
-                        txtDisp.image = img
-                    disp_texture = img
 
                 # Normal Map Texture
                 elif tag == b"\x51\xc3\x00\x00":
                     if utils.prefs().debug_output:
                         print("Normal map:", tag)
                     texture_name = obj.name + utils.prefs().import_normal_suffix
-                    cnt = unpack("<I", goz_file.read(4))[0] - 16
-                    goz_file.seek(8, 1)
-                    normName = unpack("%ss" % cnt, goz_file.read(cnt))[0]
-                    if utils.prefs().debug_output:
-                        print(normName.decode("utf-8"))
-                    img = bpy.data.images.load(
-                        normName.strip().decode("utf-8"), check_existing=True
+                    norm_texture = _load_goz_texture(
+                        goz_file, self, "Normal map", texture_name
                     )
-                    img.name = texture_name
-                    img.reload()
-
-                    if not texture_name in bpy.data.textures:
-                        txtNorm = bpy.data.textures.new(texture_name, "IMAGE")
-                        txtNorm.image = img
-                    norm_texture = img
 
                 # Unknown tags
                 else:
                     if utils.prefs().debug_output:
                         print("____ Unknown tag:{0}".format(tag))
-                    if unknown_tag >= 10:
-                        if utils.prefs().debug_output:
-                            print("...Too many object tags unknown...\n")
-                        unknown_tag += 1
-                        cnt = unpack("<I", goz_file.read(4))[0] - 8
-                        goz_file.seek(cnt, 1)
+                    if not _skip_unknown_goz_section(
+                        goz_file, self, tag, "object"
+                    ):
+                        tag = b""
                         break
 
                 tag = goz_file.read(4)
