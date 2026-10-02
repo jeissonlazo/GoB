@@ -104,6 +104,12 @@ def build_scene_object(texture_dir=None):
     face_values = np.arange(len(face_sets.data), dtype=np.int32) % 3 + 1
     face_sets.data.foreach_set("value", face_values)
 
+    # Move one vertex to an unmistakable position. Without this the cube's
+    # symmetrical coordinates make it impossible to tell whether an edit
+    # survived a trip through ZBrush.
+    mesh.vertices[0].co = (7.5, -3.25, 1.125)
+    mesh.update()
+
     obj = bpy.data.objects.new("GoBExportProbe", mesh)
     bpy.context.scene.collection.objects.link(obj)
 
