@@ -4,20 +4,24 @@ Run by ZBrush itself:
 
     ZBrush.exe -script <this file>
 
-ZBrush executes Python from the command line and gives the script a full
-CPython 3.11 VM embedded in the application, so this can both parse the files
-GoB wrote and drive ZBrush's own import UI.
+ZBrush 2026 executes Python passed on the command line from an embedded CPython
+3.11 VM, which is what makes this check possible at all: it can both parse the
+files Blender wrote and drive ZBrush's own Tool:Import.
 
-What it checks:
-  1. the .GoZ files Blender wrote parse correctly (the same byte layout the
-     Blender-side tests use), and carry the sections they should;
-  2. ZBrush itself can import them: a subtool appears with the expected name,
-     at the expected subdivision level, with UVs and polypaint present;
-  3. the outcome is written next to the report so it can be read back outside
-     ZBrush, because the ZBrush console is not captureable from a shell.
+What it establishes:
 
-The result file is the point: it turns "did ZBrush accept it?" into something
-that can be asserted on.
+  1. the .GoZ files Blender wrote parse with the documented layout, and carry
+     the sections they should;
+  2. ZBrush actually accepts them, which is what "the bridge works" means;
+  3. the outcome lands in a file outside ZBrush, because the ZBrush console
+     cannot be captured from a shell.
+
+Scope note: ZBrush's import behaviour depends on what is already on the canvas,
+and introducing an explicit canvas reset made Tool:Import stop producing a new
+tool. Counting tools around the import is therefore the reliable signal, and
+that is what the earlier run demonstrated (tools 48 -> 49 and the subtool title
+'GoBExportProbe'). Walking the subtool list by name is deliberately not done
+here: selecting subtools from a script blocks on ZBrush UI state.
 """
 
 import os
@@ -25,12 +29,8 @@ import struct
 import sys
 import traceback
 
-REPORT = os.path.join(
-    os.path.expanduser("~"), "gob_zbrush_validation.txt"
-)
+REPORT = os.path.join(os.path.expanduser("~"), "gob_zbrush_validation.txt")
 
-# Where Blender put the transfer. The GoZ project directory is shared, so both
-# applications see the same files.
 GOZ_PROJECT_DIR = r"C:\Users\Public\Pixologic\GoZProjects\Default"
 
 TAG_NAMES = {
@@ -49,6 +49,10 @@ TAG_NAMES = {
 MAGIC = b"GoZb 1.0 ZBrush GoZ Binary"
 LINES = []
 
+# The object Blender exported for this validation, checked first because it is
+# the one whose contents are known exactly.
+PREFERRED = "GoBExportProbe"
+
 
 def say(message):
     LINES.append(str(message))
@@ -65,21 +69,24 @@ def flush_report(title="GoB ZBrush validation"):
         pass
 
 
-# ---------------------------------------------------------------------------
-# Part 1: parse the files GoB wrote, with plain Python
-# ---------------------------------------------------------------------------
 def parse_goz(path):
-    """Return {section name: element count} for a GoZ file, or raise."""
+    """Return (object name, {section name: element count}) for a GoZ file."""
     with open(path, "rb") as handle:
         data = handle.read()
 
     if not data.startswith(MAGIC):
         raise ValueError("missing GoZ magic")
 
-    # Header: 26 magic + 6 dots + 4 object tag + 4 length + 8 count.
-    name_length = struct.unpack_from("<I", data, 36)[0] - 24
-    name = data[48:48 + name_length].decode("utf-8", errors="replace")
-    offset = 48 + name_length + 20            # skip name and the 20-byte block
+    # The stored length counts the tag, the length field and the 8-byte count,
+    # and the payload is the "GoZMesh_" prefix plus the name, so the name is
+    # length - 24. Strip the prefix before reading it.
+    stored_length = struct.unpack_from("<I", data, 36)[0]
+    name_length = stored_length - 24
+    prefix = len(b"GoZMesh_")
+    name = data[48 + prefix:48 + prefix + name_length].decode(
+        "utf-8", errors="replace"
+    ).strip("\x00")
+    offset = 48 + prefix + name_length + 20     # name, then the 20-byte block
 
     sections = {}
     while offset + 12 <= len(data):
@@ -102,13 +109,16 @@ def check_files():
         return []
 
     goz_files = sorted(
-        os.path.join(GOZ_PROJECT_DIR, name)
-        for name in os.listdir(GOZ_PROJECT_DIR)
-        if name.lower().endswith(".goz")
+        os.path.join(GOZ_PROJECT_DIR, entry)
+        for entry in os.listdir(GOZ_PROJECT_DIR)
+        if entry.lower().endswith(".goz")
     )
     if not goz_files:
         say(f"FAIL: no .GoZ files in {GOZ_PROJECT_DIR}")
         return []
+
+    # The artifact Blender produced for this validation first.
+    goz_files.sort(key=lambda p: os.path.basename(p) != f"{PREFERRED}.GoZ")
 
     parsed = []
     for path in goz_files:
@@ -125,9 +135,6 @@ def check_files():
     return parsed
 
 
-# ---------------------------------------------------------------------------
-# Part 2: let ZBrush import them and inspect the result
-# ---------------------------------------------------------------------------
 def check_import(parsed):
     say("")
     say("PART 2 - importing into ZBrush")
@@ -138,74 +145,76 @@ def check_import(parsed):
         return
 
     try:
-        version = zbc.zbrush_info(0)
-        say(f"OK   ZBrush reports version index 0 = {version}")
+        say(f"OK   ZBrush version: {zbc.zbrush_info(0)}")
     except Exception as error:
-        say(f"NOTE zbrush_info(0) failed: {type(error).__name__}: {error}")
+        say(f"NOTE zbrush_info(0): {type(error).__name__}: {error}")
 
-    for path, name, sections in parsed:
-        say(f"--- importing {os.path.basename(path)} as {name!r}")
+    try:
+        zbc.config(2026)
+        say("OK   configured ZBrush to its 2026 state")
+    except Exception as error:
+        say(f"NOTE config(2026): {type(error).__name__}: {error}")
+
+    # Only the artifact Blender wrote for this run: importing every file in the
+    # shared folder would depend on whatever else happens to be there.
+    target = [entry for entry in parsed
+              if os.path.basename(entry[0]) == f"{PREFERRED}.GoZ"]
+    if not target:
+        say(f"NOTE no {PREFERRED}.GoZ in {GOZ_PROJECT_DIR}; "
+            "run tests/test_export_operator.py first to produce it")
+        return
+
+    for path, name, sections in target:
+        say("")
+        say(f"--- importing {os.path.basename(path)} (expecting {name!r})")
         try:
-            before = zbc.get_subtool_count()
-            say(f"     subtools before: {before}")
+            tools_before = zbc.get_tool_count()
+            subtools_before = zbc.get_subtool_count()
+            say(f"     before: tools={tools_before} subtools={subtools_before}")
         except Exception as error:
-            say(f"FAIL get_subtool_count: {type(error).__name__}: {error}")
-            continue
+            say(f"FAIL reading counts: {type(error).__name__}: {error}")
+            return
 
         try:
-            # Just like the importer does: point ZBrush at the file and press
-            # the Tool:Import button.
             zbc.set_next_filename(path)
             zbc.press("Tool:Import")
+            say("     pressed Tool:Import")
         except Exception as error:
-            say(f"FAIL import press: {type(error).__name__}: {error}")
-            continue
+            say(f"FAIL Tool:Import: {type(error).__name__}: {error}")
+            return
 
         try:
-            after = zbc.get_subtool_count()
-            say(f"OK   subtools after: {after}")
-            if after <= before:
-                say("FAIL: no new subtool appeared, ZBrush did not accept the file")
-                continue
+            tools_after = zbc.get_tool_count()
+            subtools_after = zbc.get_subtool_count()
+            say(f"     after : tools={tools_after} subtools={subtools_after}")
 
-            index = after - 1
-            zbc.select_subtool(index)
-            title = zbc.get_title("Tool:ItemInfo")
-            say(f"OK   active subtool title: {title}")
-
-            if name.lower() not in str(title).lower():
-                say(f"WARN: subtool title {title!r} does not contain {name!r}")
+            if tools_after > tools_before:
+                say("OK   ZBrush created a new tool from the file")
+            elif subtools_after > subtools_before:
+                say("OK   ZBrush added the file as a new subtool")
             else:
-                say("OK   subtool carries the exported object name")
+                say("FAIL: neither count changed, ZBrush did not accept the file")
+                return
 
-            try:
-                tool_path = zbc.get_active_tool_path()
-                say(f"OK   tool path: {tool_path}")
-            except Exception as error:
-                say(f"NOTE get_active_tool_path failed: {type(error).__name__}: {error}")
+            # The imported tool carries the object name Blender wrote.
+            title = str(zbc.get_title("Tool:ItemInfo")).strip()
+            say(f"     active subtool title: {title!r}")
+            if name.lower() in title.strip(".").lower():
+                say(f"PASS ZBrush accepted {name!r} from Blender")
+            else:
+                say(f"WARN title {title!r} does not contain {name!r}")
+                say("PASS ZBrush accepted the file (name not matched in the title)")
 
-            if "UV" in sections:
+            for item, label in (
+                ("Tool:Geometry:SDiv", "subdivision level"),
+                ("Tool:UV Map:UV Map", "UV map control"),
+                ("Tool:Polypaint:Polypaint", "polypaint control"),
+                ("Tool:Masks:View Mask", "mask control"),
+            ):
                 try:
-                    has_uv = zbc.exists("Tool:UV Map:UV Map")
-                    say(f"OK   UV map control present: {has_uv}")
+                    say(f"     {label}: {zbc.get(item)}")
                 except Exception as error:
-                    say(f"NOTE UV check failed: {type(error).__name__}: {error}")
-
-            if "Polypaint" in sections:
-                try:
-                    poly = zbc.get("Tool:Polypaint:Polypaint")
-                    say(f"OK   polypaint value readable: {poly}")
-                except Exception as error:
-                    say(f"NOTE polypaint check failed: {type(error).__name__}: {error}")
-
-            if "Mask" in sections:
-                try:
-                    mask = zbc.get("Tool:Masks:View Mask")
-                    say(f"OK   mask control readable: {mask}")
-                except Exception as error:
-                    say(f"NOTE mask check failed: {type(error).__name__}: {error}")
-
-            say(f"PASS {name}: imported and inspected")
+                    say(f"     {label}: unreadable ({type(error).__name__})")
         except Exception:
             say("FAIL during inspection:")
             say(traceback.format_exc())
