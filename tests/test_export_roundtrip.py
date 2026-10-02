@@ -28,6 +28,7 @@ EXT = os.environ.get("GOB_EXT", "bl_ext.user_default.gob")
 MAGIC = b"GoZb 1.0 ZBrush GoZ Binary"
 TAG_VERTICES = b"\x11\x27\x00\x00"
 TAG_FACES = b"\x21\x4e\x00\x00"
+TAG_UV = b"\xa9\x61\x00\x00"
 
 FAILURES = []
 CHECKS = 0
@@ -56,7 +57,8 @@ class OperatorStub:
         print(f"INFO | {level}: {message}", flush=True)
 
 
-def build_export_bytes(name: str, mesh) -> bytes:
+def build_export_bytes(name: str, mesh, *, flip_uv_y: bool = False,
+                       flip_uv_x: bool = False) -> bytes:
     """Write the header and mesh sections exactly as exportGoZ does."""
     verts = np.empty((len(mesh.vertices), 3), dtype=np.float32)
     mesh.vertices.foreach_get("co", verts.reshape(-1))
@@ -97,6 +99,29 @@ def build_export_bytes(name: str, mesh) -> bytes:
         face_data[valid, corner] = loop_vertices[loop_starts[valid] + corner]
     out.write(face_data.astype("<u4", copy=False).tobytes())
 
+    # UVs: four (x, y) float32 pairs per FACE, corner order matching the face
+    # record, and (0, 1) padding a triangle. Note the count is the face count,
+    # not the loop count.
+    uv_layer = mesh.uv_layers.active
+    if uv_layer is not None:
+        uv_coords = np.empty((len(uv_layer.data), 2), dtype=np.float32)
+        uv_layer.data.foreach_get("uv", uv_coords.reshape(-1))
+        if flip_uv_x:
+            uv_coords[:, 0] = 1.0 - uv_coords[:, 0]
+        if flip_uv_y:
+            uv_coords[:, 1] = 1.0 - uv_coords[:, 1]
+
+        out.write(TAG_UV)
+        out.write(struct.pack("<I", len(loop_totals) * 8 * 4 + 16))
+        out.write(struct.pack("<Q", len(loop_totals)))
+        uv_data = np.empty((len(loop_totals), 4, 2), dtype=np.float32)
+        uv_data[:, :, 0] = 0.0
+        uv_data[:, :, 1] = 1.0
+        for corner in range(4):
+            valid = loop_totals > corner
+            uv_data[valid, corner] = uv_coords[loop_starts[valid] + corner]
+        out.write(uv_data.astype("<f4", copy=False).tobytes())
+
     out.write(b"\x00" * 16)   # terminator
     return out.getvalue()
 
@@ -122,21 +147,42 @@ def main():
     stub.import_material = "NONE"
     utils._TEST_PREFS = stub
 
-    # --- a mesh with a quad, a triangle and a name needing the trailer ------
+    # --- a mesh with UVs, so the UV section is exercised -------------------
     mesh = bpy.data.meshes.new("RoundTripSource")
     bm = bmesh.new()
     bmesh.ops.create_cube(bm, size=2.0)
     bm.to_mesh(mesh)
     bm.free()
+
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    # Deterministic, distinct coordinates per corner so a shift or a flip is
+    # visible rather than hidden by symmetry.
+    uv_values = np.empty(len(uv_layer.data) * 2, dtype=np.float32)
+    for index in range(len(uv_layer.data)):
+        uv_values[index * 2] = (index * 7 % 23) / 23.0
+        uv_values[index * 2 + 1] = (index * 11 % 19) / 19.0
+    uv_layer.data.foreach_set("uv", uv_values)
+
     source_verts = len(mesh.vertices)
     source_faces = len(mesh.polygons)
     source_coords = np.empty(source_verts * 3, dtype=np.float32)
     mesh.vertices.foreach_get("co", source_coords)
     source_coords = source_coords.reshape(-1, 3)
-    print(f"INFO | source mesh verts={source_verts} faces={source_faces}")
+
+    source_uvs = np.empty(len(uv_layer.data) * 2, dtype=np.float32)
+    uv_layer.data.foreach_get("uv", source_uvs)
+    print(f"INFO | source mesh verts={source_verts} faces={source_faces} "
+          f"uv_loops={len(uv_layer.data)}")
 
     name = "RoundTrip"
-    data = build_export_bytes(name, mesh)
+    # Mirror what the real exporter would do for this mesh, including the UV
+    # flip, so the fixture cannot drift from gob_export.exportGoZ. The exporter
+    # flips Y by default and the importer flips it back.
+    export_flips_uv_y = bool(utils.prefs().export_uv_flip_y)
+    export_flips_uv_x = bool(utils.prefs().export_uv_flip_x)
+    data = build_export_bytes(
+        name, mesh, flip_uv_y=export_flips_uv_y, flip_uv_x=export_flips_uv_x
+    )
 
     # --- the written header must satisfy the reader ------------------------
     stream = io.BytesIO(data)
@@ -148,13 +194,22 @@ def main():
           f"landed on {data[stream.tell():stream.tell()+4].hex(' ')}")
 
     counts = {}
-    for tag, label in ((TAG_VERTICES, "Vertices"), (TAG_FACES, "Faces")):
+    for tag, label in (
+        (TAG_VERTICES, "Vertices"),
+        (TAG_FACES, "Faces"),
+        (TAG_UV, "UV"),
+    ):
         offset = data.find(tag)
         counts[label] = struct.unpack_from("<Q", data, offset + 8)[0] if offset >= 0 else None
     check("exported vertex count matches the source",
           counts["Vertices"] == source_verts, f"{counts['Vertices']} != {source_verts}")
     check("exported face count matches the source",
           counts["Faces"] == source_faces, f"{counts['Faces']} != {source_faces}")
+    check("an object with UVs writes a UV section",
+          counts["UV"] is not None, "no UV section in the exported file")
+    check("the UV section counts faces, not loops",
+          counts["UV"] == source_faces,
+          f"UV count={counts['UV']} faces={source_faces}")
 
     # --- and the importer must rebuild an equivalent mesh ------------------
     tmp_dir = tempfile.mkdtemp(prefix="gob_roundtrip_")
@@ -202,6 +257,42 @@ def main():
         check("geometry is preserved (sorted edge lengths match)",
               edge_lengths(mesh) == edge_lengths(result),
               f"source={edge_lengths(mesh)[:4]}... result={edge_lengths(result)[:4]}...")
+
+        # --- UVs ----------------------------------------------------------
+        result_layer = result.uv_layers.active
+        check("the UV layer survived the round trip", result_layer is not None,
+              f"uv_layers={[layer.name for layer in result.uv_layers]}")
+        if result_layer is not None:
+            result_uvs = np.empty(len(result_layer.data) * 2, dtype=np.float32)
+            result_layer.data.foreach_get("uv", result_uvs)
+
+            print(f"INFO | uv loops source={len(source_uvs)//2} "
+                  f"result={len(result_uvs)//2}")
+            check("UV loop count survives export -> import",
+                  len(source_uvs) == len(result_uvs),
+                  f"{len(source_uvs)//2} -> {len(result_uvs)//2}")
+
+            # With the shipped defaults the export flip and the import flip must
+            # cancel, so the UVs come back unchanged. That pins the pair in both
+            # directions -- if either flip disappeared the values would come
+            # back mirrored and this fails.
+            flipped_result = np.stack(
+                [result_uvs[0::2], 1.0 - result_uvs[1::2]], axis=1
+            ).reshape(-1)
+            differs_from_flipped = float(np.max(np.abs(source_uvs - flipped_result)))
+
+            difference = float(np.max(np.abs(source_uvs - result_uvs)))
+            print(f"INFO | UV max difference vs source: {difference:.8f}")
+            print(f"INFO | UV max difference vs mirrored source: "
+                  f"{differs_from_flipped:.8f}")
+            check("UVs survive export -> import unchanged", difference < 1e-4,
+                  f"max difference {difference}; mirrored comparison is "
+                  f"{differs_from_flipped}")
+            check("the UV Y flip pair really cancels (not a no-op on both sides)",
+                  differs_from_flipped > 0.1,
+                  "the result matches the mirrored source too, so the flips are "
+                  "not doing anything and a regression on either side would go "
+                  "unnoticed")
 
     # --- clean up the temp file --------------------------------------------
     try:
