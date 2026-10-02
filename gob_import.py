@@ -1067,7 +1067,6 @@ class GoB_OT_import(Operator):
                             nodes.create_base_nodes(objMat)
                             if objMat.name not in obj.material_slots:
                                 obj.data.materials.append(objMat)
-                                objMat.use_nodes = True
                                 rgba = (
                                     random.random(),
                                     random.random(),

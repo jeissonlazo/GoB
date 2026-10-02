@@ -487,7 +487,9 @@ class GoB_OT_export(Operator):
             textures = {}
             for slot in obj.material_slots:
                 material = slot.material
-                if material is None or not material.use_nodes:
+                # Check the node tree, not Material.use_nodes: reading that
+                # property emits a DeprecationWarning in Blender 5.2.
+                if material is None or material.node_tree is None:
                     continue
                 for node in material.node_tree.nodes:
                     if node.type != 'TEX_IMAGE' or node.image is None:

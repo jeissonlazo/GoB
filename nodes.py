@@ -79,10 +79,25 @@ def _set_image(node, image, colorspace=None):
         image.colorspace_settings.name = colorspace
 
 
+def _nodetree(mat):
+    """Return the material's node tree, creating one only if truly absent.
+
+    This deliberately never touches ``Material.use_nodes``. In Blender 5.2 even
+    *reading* that property raises a DeprecationWarning ("expected to be removed
+    in Blender 6.0"), and every material created since 2.8 already has a node
+    tree with a Principled BSDF and a Material Output, so the flag was doing
+    nothing except printing a warning.
+    """
+    tree = mat.node_tree
+    if tree is None:
+        mat.use_nodes = True
+        tree = mat.node_tree
+    return tree
+
+
 def create_base_nodes(mat):
     """Create the base nodes for the material."""
-    mat.use_nodes = True
-    tree = mat.node_tree
+    tree = _nodetree(mat)
 
     output_node = _find_node(tree, 'ShaderNodeOutputMaterial')
     if output_node is None:
@@ -190,8 +205,7 @@ def set_node_base_color(mat, rgba):
     Kept here so the hard-coded ``nodes["Principled BSDF"]`` lookup only
     exists in one place.
     """
-    mat.use_nodes = True
-    shader_node = _find_node(mat.node_tree, 'ShaderNodeBsdfPrincipled')
+    shader_node = _find_node(_nodetree(mat), 'ShaderNodeBsdfPrincipled')
     if shader_node is None:
         return None
     socket = _socket(shader_node, 'Base Color', 'INPUT')

@@ -66,9 +66,10 @@ def node_named(mat, node_type, label=None):
 
 
 def build_material(name):
-    mat = bpy.data.materials.new(name)
-    mat.use_nodes = True
-    return mat
+    # Deliberately does not touch Material.use_nodes: reading that property
+    # raises a DeprecationWarning in Blender 5.2, and a material created through
+    # the API already has a node tree.
+    return bpy.data.materials.new(name)
 
 
 def _load_addon():
@@ -223,6 +224,27 @@ def main():
         duplicate_ok = False
         print(f"INFO | duplicate-node case raised {type(exc).__name__}: {exc}")
     check("material build survives a duplicated Principled node", duplicate_ok)
+
+    # --- Material.use_nodes must not be touched ----------------------------
+    # Blender 5.2 warns that it is removed in 6.0, and even reading it emits the
+    # warning, so the add-on must build materials without it.
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        probe = bpy.data.materials.new("goz_test_no_use_nodes")
+        nodes.material_from_texture(probe, diff_img, norm_img, disp_img)
+        poly_probe = bpy.data.materials.new("goz_test_no_use_nodes_pp")
+        nodes.material_from_polypaint(poly_probe)
+        color_probe = bpy.data.materials.new("goz_test_no_use_nodes_col")
+        nodes.set_node_base_color(color_probe, (1.0, 0.0, 0.0, 1.0))
+    use_nodes_warnings = [
+        str(w.message) for w in caught if "use_nodes" in str(w.message)
+    ]
+    check("building materials does not touch Material.use_nodes",
+          not use_nodes_warnings, f"{use_nodes_warnings}")
+    check("a material made through the API already has a node tree",
+          nodes._nodetree(probe) is not None)
 
     print("=" * 72)
     print(f"RESULT checks={CHECKS} failures={len(FAILURES)}")
