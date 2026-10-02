@@ -50,7 +50,7 @@ def draw_goz_buttons(self, context):
                      emboss=True, 
                      icon_value=icons[icon_goz_send].icon_id)
 
-        if gob_import.run_background_update:
+        if gob_import.is_sync_active():
             row.operator(operator="scene.gob_import", 
                          text=iface_("Import", None), 
                          emboss=True, 
@@ -75,7 +75,7 @@ def draw_goz_buttons(self, context):
                      emboss=True, 
                      icon_value=icons[icon_goz_send].icon_id)
 
-        if gob_import.run_background_update:
+        if gob_import.is_sync_active():
             row.operator(operator="scene.gob_import", 
                          text="", 
                          emboss=True, 

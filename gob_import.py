@@ -169,7 +169,26 @@ def _skip_unknown_goz_section(goz_file, operator, tag, section_name):
 
 
 def _read_goz_object_name(goz_file, operator):
-    """Read and validate the mandatory object-name record at the file start."""
+    """Read and validate the mandatory object-name record at the file start.
+
+    The name record packs three things into one section, which is why it does
+    not follow the mesh sections' rule:
+
+        offset 36   <I  length = len(name) + 24
+        offset 40   <Q  count
+        offset 48   b"GoZMesh_" + name        8 + len(name) bytes
+        offset 71   <4B 0x89 0x13 0x00 0x00   trailer  \  a 20-byte block that
+                    <I 20, <Q 1, <I 0          the importer consumes here
+        offset 91   first mesh section tag
+
+    So the name itself is ``length - 24`` bytes, followed by a fixed 20-byte
+    block. Treating the whole ``length - 16`` as the name swallowed the trailer
+    into the object name, and leaving the 20-byte block behind made the parser
+    read it as a mesh section -- which happened to realign only because that
+    block's own length field advanced by exactly the right amount.
+
+    Verified byte by byte against a ZBrush-written file.
+    """
 
     file_header = goz_file.read(36)
     if len(file_header) != 36:
@@ -179,27 +198,51 @@ def _read_goz_object_name(goz_file, operator):
         )
         return None
 
-    payload = _read_length_prefixed_goz_section(
-        goz_file, operator, "Object name"
-    )
-    if payload is None:
-        return None
-    if len(payload) < 16:
+    header = goz_file.read(12)
+    if len(header) != 12:
         _report_import_warning(
             operator,
-            "Object name section is too short; the object was not imported.",
+            "Object name section has a truncated header; the object was not "
+            "imported.",
+        )
+        return None
+    section_length = unpack_from("<I", header, 0)[0]
+
+    name_length = section_length - 24
+    if name_length < 0:
+        _report_import_warning(
+            operator,
+            f"Object name section has an invalid length ({section_length}); "
+            "the object was not imported.",
         )
         return None
 
-    name_record = payload[8:]
-    if not name_record.startswith(b"GoZMesh_"):
+    payload = goz_file.read(len(b"GoZMesh_") + name_length)
+    if len(payload) != len(b"GoZMesh_") + name_length:
+        _report_import_warning(
+            operator,
+            "Object name section is truncated; the object was not imported.",
+        )
+        return None
+
+    if not payload.startswith(b"GoZMesh_"):
         _report_import_warning(
             operator,
             "Object name section has an invalid prefix; the object was not imported.",
         )
         return None
 
-    name_bytes = name_record[len(b"GoZMesh_") :]
+    # The 20-byte name trailer follows and belongs to this record; not consuming
+    # it makes the parser read it as if it were the first mesh section.
+    trailer = goz_file.read(20)
+    if len(trailer) != 20:
+        _report_import_warning(
+            operator,
+            "Object name trailer is truncated; the object was not imported.",
+        )
+        return None
+
+    name_bytes = payload[len(b"GoZMesh_") :]
     try:
         decoded_name = name_bytes.decode("utf-8")
     except UnicodeDecodeError:
@@ -1343,36 +1386,70 @@ class GoB_OT_import(Operator):
             return {"FINISHED"}
 
         if self.action == "AUTO":
-            if utils.prefs().import_method == "AUTOMATIC":
-                global run_background_update
-                if run_background_update:
-                    if bpy.app.timers.is_registered(run_import_periodically):
-                        bpy.app.timers.unregister(run_import_periodically)
-                        if utils.prefs().debug_output:
-                            print("Disabling GOZ background listener")
-                    run_background_update = False
-                else:
-                    if not bpy.app.timers.is_registered(run_import_periodically):
-                        global cached_last_edition_time
-                        paths.set_goz_path_from_preferences()
-                        GoZ_ObjectList = paths.PATH_OBJLIST
-                        try:
-                            cached_last_edition_time = os.path.getmtime(GoZ_ObjectList)
-                        except Exception:
-                            f = open(GoZ_ObjectList, "x")
-                            f.close()
-                        bpy.app.timers.register(
-                            run_import_periodically, persistent=True
-                        )
-                        if utils.prefs().debug_output:
-                            print("Enabling GOZ background listener")
-                    run_background_update = True
-            elif run_background_update:
-                if bpy.app.timers.is_registered(run_import_periodically):
-                    bpy.app.timers.unregister(run_import_periodically)
-                    print("Disabling GOZ background listener")
-                run_background_update = False
+            if utils.prefs().import_method != "AUTOMATIC":
+                # Manual mode: make sure no listener is left running.
+                set_sync_active(False)
+            else:
+                set_sync_active(not is_sync_active())
             return {"FINISHED"}
+
+
+def is_sync_active():
+    """Return whether the background GoZ listener is really running.
+
+    Derived from the timer registration rather than a separate flag, so what
+    the header button shows cannot drift from reality after a reload or a
+    failed registration.
+    """
+
+    return bpy.app.timers.is_registered(run_import_periodically)
+
+
+def _debug_enabled():
+    """Read the debug preference without letting a missing add-on break cleanup."""
+    try:
+        return bool(utils.prefs().debug_output)
+    except RuntimeError:
+        return False
+
+
+def set_sync_active(active):
+    """Start or stop the background GoZ listener.
+
+    Called both from the header button and from the add-on's register(), which
+    is what makes automatic mode survive a Blender restart. Returns the
+    resulting state.
+
+    Stopping must never raise: it is the cleanup path used when preferences
+    have already gone away, so reading them here would mask the original error.
+    """
+
+    global run_background_update, cached_last_edition_time, _last_seen_paths
+
+    if active:
+        paths.set_goz_path_from_preferences()
+        object_list = paths.PATH_OBJLIST
+        try:
+            cached_last_edition_time = os.path.getmtime(object_list)
+        except OSError:
+            # ZBrush has not written the list yet; start from a state that
+            # treats the first revision as new instead of failing to enable.
+            cached_last_edition_time = 0.0
+        _last_seen_paths = []
+
+        if not bpy.app.timers.is_registered(run_import_periodically):
+            bpy.app.timers.register(run_import_periodically, persistent=True)
+        run_background_update = True
+        if _debug_enabled():
+            print("GoB: enabled the background GoZ listener")
+    else:
+        if bpy.app.timers.is_registered(run_import_periodically):
+            bpy.app.timers.unregister(run_import_periodically)
+            if _debug_enabled():
+                print("GoB: disabled the background GoZ listener")
+        run_background_update = False
+
+    return run_background_update
 
 
 def read_goz_object_list():
@@ -1448,19 +1525,31 @@ def _revision_changed(paths_found, mtime):
 
 
 def run_import_periodically():
-    # print("Runing timers update check")
-    global cached_last_edition_time, _last_seen_paths, run_background_update
+    """Timer callback: import whatever ZBrush has sent since the last poll."""
+
+    global cached_last_edition_time, _last_seen_paths
+    try:
+        return _run_import_periodically()
+    except RuntimeError as error:
+        # utils.prefs() raises when the add-on has been disabled while this
+        # persistent timer was still alive. Stop cleanly instead of letting
+        # Blender log the same traceback on every tick.
+        print(f"GoB: stopping the background listener ({error})")
+        set_sync_active(False)
+        return None
+
+
+def _run_import_periodically():
+    global cached_last_edition_time, _last_seen_paths
+
     paths.set_goz_path_from_preferences()
 
     try:
         file_edition_time = os.path.getmtime(paths.PATH_OBJLIST)
-        # print("file_edition_time: ", file_edition_time, end='\n\n')
-    except Exception as e:
-        print(e)
-        run_background_update = False
-        if bpy.app.timers.is_registered(run_import_periodically):
-            bpy.app.timers.unregister(run_import_periodically)
-        return utils.prefs().import_timer
+    except OSError as error:
+        print(f"GoB: cannot read {paths.PATH_OBJLIST}: {error}")
+        set_sync_active(False)
+        return None
 
     paths_found, _ = read_goz_object_list()
     if _revision_changed(paths_found, file_edition_time):
@@ -1476,10 +1565,10 @@ def run_import_periodically():
             "GOZ: Nothing to update", file_edition_time - cached_last_edition_time
         )
 
-    if not run_background_update and bpy.app.timers.is_registered(
-        run_import_periodically
-    ):
-        bpy.app.timers.unregister(run_import_periodically)
+    if not is_sync_active():
+        # Something else turned the listener off (the header toggle, or a
+        # preference change); stop reporting a timer interval.
+        return None
 
     return utils.prefs().import_timer
 

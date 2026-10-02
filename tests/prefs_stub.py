@@ -8,11 +8,25 @@ honest: if a default changes in preferences.py, the tests follow it.
 """
 
 
+class _PrefsStub:
+    """Stand-in exposing the add-on preferences' default values."""
+
+    def __init__(self):
+        # Names the add-on explicitly set, mirroring Blender's
+        # ``is_property_set`` so path-resolution code can be exercised.
+        self._explicitly_set = set()
+
+    def is_property_set(self, name):
+        return name in self._explicitly_set
+
+    def set(self, name, value):
+        """Assign a preference and mark it as explicitly set."""
+        setattr(self, name, value)
+        self._explicitly_set.add(name)
+
+
 def build_prefs_stub(pref_cls):
     """Return an object exposing the add-on preferences' default values."""
-
-    class _PrefsStub:
-        pass
 
     stub = _PrefsStub()
     props = pref_cls.bl_rna.properties
@@ -24,7 +38,7 @@ def build_prefs_stub(pref_cls):
             default = prop.default
         except AttributeError:
             continue
-        # Array/collection defaults are not needed by the node helpers.
+        # Collection and array defaults are not needed by the code under test.
         if isinstance(default, (str, int, float, bool)):
             setattr(stub, identifier, default)
     return stub

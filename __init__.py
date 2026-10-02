@@ -22,7 +22,7 @@ import os
 import bpy
 import bpy.utils.previews
 
-from . import gob_export, gob_import, paths, preferences, ui
+from . import gob_export, gob_import, paths, preferences, ui, utils
 
 bl_info = {
     "name": "GoB",
@@ -48,8 +48,19 @@ classes = (
 )
 
 
+_registered = False
+
+
 def register():
+    global _registered
+    if _registered:
+        # Blender can reach register() again after a partial unregister() (for
+        # example when a reload failed halfway). Registering the same classes
+        # twice raises, so treat the call as idempotent.
+        return
+
     [bpy.utils.register_class(c) for c in classes]
+    _registered = True
 
     global icons
     icons = bpy.utils.previews.new()
@@ -68,16 +79,44 @@ def register():
     ui.preview_collections["main"] = icons
     bpy.types.TOPBAR_HT_upper_bar.prepend(ui.draw_goz_buttons)
 
+    # Re-arm the background listener. Automatic mode used to be silently lost on
+    # every Blender restart, leaving the header button claiming sync was off
+    # while ZBrush exports went unnoticed.
+    try:
+        if utils.prefs().import_method == "AUTOMATIC":
+            gob_import.set_sync_active(True)
+    except Exception as error:  # pragma: no cover - startup diagnostics only
+        print(f"GoB: could not start the background listener: {error}")
+
 
 def unregister():
+    global _registered
+    if not _registered:
+        return
 
-    for preferences.custom_icons in ui.preview_collections.values():
-        bpy.utils.previews.remove(icons)
+    # Stop the timer first so it cannot fire while the classes are being torn
+    # down. set_sync_active(False) also clears the module flag; previously the
+    # flag stayed True and the header icon kept showing sync as enabled.
+    gob_import.set_sync_active(False)
+
+    try:
+        bpy.types.TOPBAR_HT_upper_bar.remove(ui.draw_goz_buttons)
+    except (ValueError, RuntimeError):
+        pass
+
+    for preview_collection in list(ui.preview_collections.values()):
+        try:
+            bpy.utils.previews.remove(preview_collection)
+        except (KeyError, RuntimeError):
+            pass
     ui.preview_collections.clear()
 
-    bpy.types.TOPBAR_HT_upper_bar.remove(ui.draw_goz_buttons)
+    for cls in reversed(classes):
+        try:
+            bpy.utils.unregister_class(cls)
+        except (RuntimeError, ValueError) as error:
+            # Blender reports "missing bl_rna attribute" when the class was
+            # already torn down; a reload can leave the module in that state.
+            print(f"GoB: {cls.__name__} was already unregistered ({error})")
 
-    [bpy.utils.unregister_class(c) for c in classes]
-
-    if bpy.app.timers.is_registered(gob_import.run_import_periodically):
-        bpy.app.timers.unregister(gob_import.run_import_periodically)
+    _registered = False
