@@ -619,6 +619,8 @@ class GoB_OT_export(Operator):
         """
         import_as_subtool = 'IMPORT_AS_SUBTOOL = TRUE'
         import_as_tool = 'IMPORT_AS_SUBTOOL = FALSE'
+        wanted = import_as_tool if self.as_tool else import_as_subtool
+        unwanted = import_as_subtool if self.as_tool else import_as_tool
 
         try:
             with open(paths.PATH_CONFIG, "rt") as handle:
@@ -627,12 +629,24 @@ class GoB_OT_export(Operator):
             # Not there yet: start from the setting ZBrush defaults to.
             config = f"SHOW_HELP_WINDOW = FALSE\n{import_as_subtool}\n"
 
-        if self.as_tool:
-            new_config = config.replace(import_as_subtool, import_as_tool)
-        else:
-            new_config = config.replace(import_as_tool, import_as_subtool)
-        if new_config == config and not self.as_tool:
-            new_config = config.rstrip("\n") + f"\n{import_as_subtool}\n"
+        # Rewrite every occurrence, then collapse them to one line. The previous
+        # version fell through to appending when the value was already correct,
+        # so each export added another IMPORT_AS_SUBTOOL line and the file grew
+        # without bound.
+        lines = []
+        seen_setting = False
+        for line in config.splitlines():
+            stripped = line.strip()
+            if stripped in (import_as_subtool, import_as_tool):
+                if seen_setting:
+                    continue          # drop duplicates
+                lines.append(wanted)
+                seen_setting = True
+                continue
+            lines.append(line)
+        if not seen_setting:
+            lines.append(wanted)
+        new_config = "\n".join(lines).rstrip("\n") + "\n"
 
         try:
             with open(paths.PATH_CONFIG, "wt") as handle:
