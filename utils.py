@@ -41,15 +41,23 @@ def prefs():
     if _TEST_PREFS is not None:
         return _TEST_PREFS
 
+    unavailable = (
+        f"GoB: preferences for {__package__!r} are unavailable because the "
+        "add-on is not enabled. Enable GoB in Preferences > Add-ons and retry."
+    )
     addons = bpy.context.preferences.addons
     try:
-        return addons[__package__].preferences
+        entry = addons[__package__]
     except KeyError:
-        raise RuntimeError(
-            f"GoB: preferences for {__package__!r} are unavailable because the "
-            "add-on is not enabled. Enable GoB in Preferences > Add-ons and "
-            "retry."
-        ) from None
+        raise RuntimeError(unavailable) from None
+
+    # A registered entry can still carry no preferences, and returning None
+    # would surface much later as a bare AttributeError on whatever attribute
+    # the caller happened to touch first.
+    preferences = getattr(entry, "preferences", None)
+    if preferences is None:
+        raise RuntimeError(unavailable)
+    return preferences
 
 
 def platform_path_storage_key(property_name, system=None):

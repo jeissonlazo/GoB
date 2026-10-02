@@ -813,6 +813,15 @@ class GoB_OT_export(Operator):
         return {'FINISHED'}
 
     def escape_object_name(self, obj):
+        """Rename an object to a ZBrush-safe name, in place.
+
+        This only sanitises characters ZBrush does not accept and resolves real
+        collisions. Blender's ".001" suffix is deliberately preserved here: the
+        ZScript updates a subtool only when the names are equal, so dropping the
+        suffix while another object already owns the short name would silently
+        merge two different objects onto one ZBrush subtool. The suffix is
+        avoided at the source instead, in gob_import.find_object_for_name.
+        """
         import re
 
         original_name = obj.name

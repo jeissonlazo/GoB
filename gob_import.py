@@ -488,6 +488,34 @@ class GoB_OT_import(Operator):
             f"'{view_layer.name}'."
         ) from link_error
 
+    @staticmethod
+    def find_object_for_name(objName):
+        """Return the object a GoZ object should be imported into, if any.
+
+        Look for the exact name first, then for Blender's suffixed variants
+        ("finger2.001"). Reusing a suffixed object matters because the export
+        matches objects against ZBrush subtools by name: creating a new
+        "finger2.001" instead of updating "finger2" made the exporter write
+        "finger2_001", no subtool matched, and ZBrush added a second subtool
+        rather than updating the one the user was working on.
+        """
+        exact = bpy.data.objects.get(objName)
+        if exact is not None:
+            return exact
+
+        prefix = f"{objName}."
+        candidates = [
+            candidate
+            for candidate in bpy.data.objects
+            if candidate.name.startswith(prefix)
+            and candidate.name[len(prefix):].isdigit()
+        ]
+        if not candidates:
+            return None
+        # Lowest suffix first, so ".001" wins over ".002".
+        candidates.sort(key=lambda item: item.name)
+        return candidates[0]
+
     def make_mesh(self, objName, vertsData, facesData) -> tuple:
         """Create or update a mesh object from the given vertices and faces data.
 
@@ -503,7 +531,7 @@ class GoB_OT_import(Operator):
         if utils.prefs().debug_output:
             print(f"\nGoB Object Name: {objName}")
 
-        obj = bpy.data.objects.get(objName)
+        obj = self.find_object_for_name(objName)
         object_exists = obj is not None
         if object_exists:
             if utils.prefs().debug_output:
@@ -522,6 +550,12 @@ class GoB_OT_import(Operator):
                 print(
                     "Error: Active layer collection is not set or invalid. Object could not be linked."
                 )
+            # Blender suffixes the name when it is already taken by something it
+            # cannot see (an unlinked leftover, for instance). Put the plain name
+            # back when it is free, so the export keeps matching the ZBrush
+            # subtool instead of writing "name_001".
+            if obj.name != objName and bpy.data.objects.get(objName) is None:
+                obj.name = objName
 
         decoded_faces = _decode_face_data(facesData)
         topology_matches = object_exists and self.mesh_topology_matches(
@@ -1417,10 +1451,15 @@ def is_sync_active():
 
 
 def _debug_enabled():
-    """Read the debug preference without letting a missing add-on break cleanup."""
+    """Read the debug preference without letting a missing add-on break cleanup.
+
+    Any failure counts as "no debug": this is only used to decide whether to
+    print, and raising from here would abort the cleanup paths that call it.
+    """
     try:
-        return bool(utils.prefs().debug_output)
-    except RuntimeError:
+        preferences = utils.prefs()
+        return bool(preferences.debug_output)
+    except (RuntimeError, AttributeError, KeyError):
         return False
 
 
@@ -1454,11 +1493,11 @@ def set_sync_active(active):
         if _debug_enabled():
             print("GoB: enabled the background GoZ listener")
     else:
+        # Stop unconditionally and silently: this is the cleanup path, and it
+        # runs precisely when things are already going wrong.
+        run_background_update = False
         if bpy.app.timers.is_registered(run_import_periodically):
             bpy.app.timers.unregister(run_import_periodically)
-            if _debug_enabled():
-                print("GoB: disabled the background GoZ listener")
-        run_background_update = False
 
     return run_background_update
 

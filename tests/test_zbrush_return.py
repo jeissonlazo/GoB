@@ -57,7 +57,8 @@ class OperatorStub:
         self._cls = cls
         for name in ("make_mesh",):
             setattr(self, name, cls.__dict__[name].__get__(self, type(self)))
-        for name in ("mesh_topology_matches", "_ensure_object_in_view_layer"):
+        for name in ("mesh_topology_matches", "_ensure_object_in_view_layer",
+                     "find_object_for_name"):
             member = cls.__dict__[name]
             setattr(self, name, getattr(member, "__func__", member))
 
