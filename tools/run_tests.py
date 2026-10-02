@@ -27,10 +27,9 @@ DEFAULT_BLENDER_GLOBS = [
     "/usr/local/bin/blender",
 ]
 
-# This module imports the add-on as a package named 'gob' while the checkout is
-# 'GoB', so it raises ModuleNotFoundError on case-sensitive lookups. Excluded so
-# its status stays visible instead of the runner failing outright.
-LEGACY_SKIP = {"test_import_view_layer.py"}
+# Test files that are deliberately not run. Kept explicit so a file that stops
+# working never just disappears from the suite silently.
+LEGACY_SKIP: set[str] = set()
 
 VERDICT_RE = re.compile(r"^VERDICT\s+(\S+)", re.MULTILINE)
 
