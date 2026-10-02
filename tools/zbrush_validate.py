@@ -167,6 +167,8 @@ def check_import(parsed):
     for path, name, sections in target:
         say("")
         say(f"--- importing {os.path.basename(path)} (expecting {name!r})")
+        with open(path, "rb") as handle:
+            data = handle.read()
         try:
             tools_before = zbc.get_tool_count()
             subtools_before = zbc.get_subtool_count()
@@ -210,11 +212,41 @@ def check_import(parsed):
                 ("Tool:UV Map:UV Map", "UV map control"),
                 ("Tool:Polypaint:Polypaint", "polypaint control"),
                 ("Tool:Masks:View Mask", "mask control"),
+                ("Tool:Texture Map:TextureMap", "texture map control"),
+                ("Tool:Displacement Map:DisplacementMap", "displacement control"),
+                ("Tool:Normal Map:Normal Map", "normal map control"),
             ):
                 try:
                     say(f"     {label}: {zbc.get(item)}")
                 except Exception as error:
                     say(f"     {label}: unreadable ({type(error).__name__})")
+
+            # Polypaint sections are the odd one out: a 4-byte count plus a
+            # float, not the 8-byte count every other section uses.
+            for tag, label in ((b"\xb9\x88\x00\x00", "polypaint"),
+                               (b"\x32\x75\x00\x00", "mask"),
+                               (b"\x41\x9c\x00\x00", "polygroups"),
+                               (b"\xa9\x61\x00\x00", "uv"),
+                               (b"\xc9\xaf\x00\x00", "diffuse texture"),
+                               (b"\xd9\xd6\x00\x00", "displacement texture"),
+                               (b"\x51\xc3\x00\x00", "normal texture")):
+                offset = data.find(tag)
+                if offset < 0:
+                    say(f"     {label}: section absent")
+                    continue
+                length = struct.unpack_from("<I", data, offset + 4)[0]
+                payload = data[offset + 16:offset + length]
+                if tag == b"\xb9\x88\x00\x00":
+                    count = struct.unpack_from("<I", data, offset + 8)[0]
+                    say(f"     {label}: count={count} payload={len(payload)} bytes")
+                elif tag in (b"\xc9\xaf\x00\x00", b"\xd9\xd6\x00\x00",
+                             b"\x51\xc3\x00\x00"):
+                    reference = payload.decode("utf-8", "replace").rstrip("\x00")
+                    exists = os.path.isfile(reference)
+                    say(f"     {label}: {reference} exists={exists}")
+                else:
+                    count = struct.unpack_from("<Q", data, offset + 8)[0]
+                    say(f"     {label}: count={count} payload={len(payload)} bytes")
         except Exception:
             say("FAIL during inspection:")
             say(traceback.format_exc())

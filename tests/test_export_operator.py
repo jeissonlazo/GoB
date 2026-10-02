@@ -64,8 +64,12 @@ def sections_of(data):
     return found
 
 
-def build_scene_object():
-    """A cube carrying UVs, polypaint, a sculpt mask and face sets."""
+def build_scene_object(texture_dir=None):
+    """A cube carrying UVs, polypaint, a sculpt mask and face sets.
+
+    When ``texture_dir`` is given, a material with diffuse, normal and
+    displacement image nodes is attached so the texture export stage runs.
+    """
     mesh = bpy.data.meshes.new("GoBExportMesh")
     bm = bmesh.new()
     bmesh.ops.create_cube(bm, size=2.0)
@@ -102,6 +106,33 @@ def build_scene_object():
 
     obj = bpy.data.objects.new("GoBExportProbe", mesh)
     bpy.context.scene.collection.objects.link(obj)
+
+    if texture_dir is not None:
+        # Named so the exporter's suffix matching finds them.
+        mat = bpy.data.materials.new("GoBExportMat")
+        mat.use_nodes = True
+        tree = mat.node_tree
+        shader = next(
+            (n for n in tree.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled"),
+            None,
+        )
+        for kind in ("diff", "norm", "disp"):
+            image = bpy.data.images.new(f"probe_{kind}", 4, 4)
+            pixels = np.zeros(4 * 4 * 4, dtype=np.float32)
+            for index in range(4 * 4):
+                pixels[index * 4] = (index % 4) / 3.0
+                pixels[index * 4 + 1] = (index % 3) / 2.0
+                pixels[index * 4 + 2] = 0.5
+                pixels[index * 4 + 3] = 1.0
+            image.pixels.foreach_set(pixels)
+            node = tree.nodes.new("ShaderNodeTexImage")
+            node.image = image
+            if kind == "diff" and shader is not None:
+                tree.links.new(
+                    shader.inputs["Base Color"], node.outputs["Color"]
+                )
+        obj.data.materials.append(mat)
+
     for other in bpy.context.selected_objects:
         other.select_set(False)
     obj.select_set(True)
@@ -152,9 +183,10 @@ def main():
     original_goz = paths.PATH_GOZ
     paths.set_goz_path(goz_root)
     try:
-        obj = build_scene_object()
+        obj = build_scene_object(texture_dir=project)
         print(f"INFO | source object {obj.name!r} verts={len(obj.data.vertices)} "
-              f"polys={len(obj.data.polygons)}")
+              f"polys={len(obj.data.polygons)} "
+              f"materials={[m.name for m in obj.data.materials]}")
 
         result = bpy.ops.scene.gob_export()
         check("the export operator ran headless", "FINISHED" in result, f"{result}")
@@ -214,6 +246,52 @@ def main():
             check("fully masked vertices are 0 on the wire", records[-1] == 0,
                   f"last record {records[-1]}")
 
+        # --- textures -----------------------------------------------------
+        # A material with diffuse, normal and displacement image nodes makes the
+        # texture stage run: each is saved next to the project as .bmp and its
+        # path is recorded in the file for ZBrush to load.
+        prefs = utils.prefs()
+        expected_textures = {
+            "diff": f"{obj.name}{prefs.import_diffuse_suffix}.bmp",
+            "norm": f"{obj.name}{prefs.import_normal_suffix}.bmp",
+            "disp": f"{obj.name}{prefs.import_displace_suffix}.bmp",
+        }
+        for kind, filename in expected_textures.items():
+            texture_path = paths.join_goz_path(project, filename)
+            check(f"the {kind} texture was saved inside the project directory",
+                  os.path.isfile(texture_path), f"expected {texture_path}")
+            if os.path.isfile(texture_path):
+                check(f"the {kind} texture is not empty",
+                      os.path.getsize(texture_path) > 0,
+                      f"{os.path.getsize(texture_path)} bytes")
+                print(f"INFO | {kind} texture {filename} "
+                      f"{os.path.getsize(texture_path)} bytes")
+
+        # Each saved texture must be referenced in the file, in UTF-8, and
+        # nothing may be referenced that was not written.
+        for kind, tag in (("diff", b"\xc9\xaf\x00\x00"),
+                          ("disp", b"\xd9\xd6\x00\x00"),
+                          ("norm", b"\x51\xc3\x00\x00")):
+            offset = data.find(tag)
+            check(f"the {kind} texture is referenced in the .GoZ file",
+                  offset >= 0, "no texture section in the exported file")
+            if offset < 0:
+                continue
+            length = struct.unpack_from("<I", data, offset + 4)[0]
+            recorded = data[offset + 16:offset + length].decode(
+                "utf-8", errors="replace"
+            )
+            print(f"INFO | {kind} reference: {recorded}")
+            check(f"the {kind} reference points at the saved file",
+                  recorded.replace("\\", "/").endswith(expected_textures[kind]),
+                  f"recorded {recorded!r}")
+            check(f"the {kind} reference names a file that exists",
+                  os.path.isfile(recorded), f"{recorded} is missing")
+
+        check("the render image format was restored after exporting textures",
+              bpy.context.scene.render.image_settings.file_format != "BMP",
+              f"left on {bpy.context.scene.render.image_settings.file_format}")
+
         # The handshake files ZBrush reads.
         check("GoB_variables.zvr written",
               os.path.isfile(os.path.join(project, "GoB_variables.zvr")))
@@ -229,16 +307,49 @@ def main():
                   bool(entries) and os.path.isfile(f"{entries[0]}.GoZ"),
                   f"{entries}")
 
-        # Hand the file over for ZBrush to pick up.
+        # Hand the files over for ZBrush to pick up. The textures have to travel
+        # with the .GoZ: its texture references are absolute paths, so a texture
+        # left behind in a temporary folder cannot be found by ZBrush.
         handoff = os.path.join(
             os.environ.get("PUBLIC", r"C:\Users\Public"),
             "Pixologic", "GoZProjects", "Default",
         )
         if os.path.isdir(handoff):
             import shutil
-            target = os.path.join(handoff, f"{obj.name}.GoZ")
-            shutil.copy2(goz_path, target)
-            print(f"INFO | copied the artifact to {target} for ZBrush to import")
+            copied = []
+            for filename in [f"{obj.name}.GoZ"] + list(expected_textures.values()):
+                source = paths.join_goz_path(project, filename)
+                if os.path.isfile(source):
+                    target = paths.join_goz_path(handoff, filename)
+                    shutil.copy2(source, target)
+                    copied.append(target)
+            print(f"INFO | handed {len(copied)} file(s) to ZBrush:")
+            for path in copied:
+                print(f"INFO |   {path} ({os.path.getsize(path)} bytes)")
+
+            # Rewrite the texture references so they point at the copies ZBrush
+            # will actually look at, since the file was built against the
+            # temporary project directory.
+            with open(paths.join_goz_path(handoff, f"{obj.name}.GoZ"), "rb") as fh:
+                handed = bytearray(fh.read())
+            for kind, tag in (("diff", b"\xc9\xaf\x00\x00"),
+                              ("disp", b"\xd9\xd6\x00\x00"),
+                              ("norm", b"\x51\xc3\x00\x00")):
+                offset = handed.find(tag)
+                if offset < 0:
+                    continue
+                length = struct.unpack_from("<I", handed, offset + 4)[0]
+                start, end = offset + 16, offset + length
+                recorded = bytes(handed[start:end]).decode("utf-8", "replace")
+                basename = os.path.basename(recorded)
+                replacement = paths.join_goz_path(handoff, basename).encode("utf-8")
+                if len(replacement) > end - start:
+                    print(f"INFO | {kind} reference does not fit, skipped")
+                    continue
+                handed[start:end] = replacement + b"\x00" * (end - start - len(replacement))
+                print(f"INFO | repointed the {kind} texture reference to {replacement.decode()}")
+            with open(paths.join_goz_path(handoff, f"{obj.name}.GoZ"), "wb") as fh:
+                fh.write(handed)
     finally:
         paths.set_goz_path(original_goz)
 
