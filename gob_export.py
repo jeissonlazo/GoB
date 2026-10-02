@@ -476,73 +476,74 @@ class GoB_OT_export(Operator):
                     if utils.prefs().performance_profiling:
                         start_time = utils.profiler(start_time, "Write Polygroup materials")
 
-            # Diff, disp_texture and norm_texture maps
-            diff_texture = None
-            disp_texture = None
-            norm_texture = None
+            # Diffuse, displacement and normal maps.
+            #
+            # Textures are matched to the configured suffixes and saved next to
+            # the project as .bmp, then the path is recorded in the file for
+            # ZBrush to load. A texture that fails to save is not linked: the
+            # old code wrote the path regardless, so ZBrush was told to load a
+            # file that does not exist.
+            prefs = utils.prefs()
+            textures = {}
+            for slot in obj.material_slots:
+                material = slot.material
+                if material is None or not material.use_nodes:
+                    continue
+                for node in material.node_tree.nodes:
+                    if node.type != 'TEX_IMAGE' or node.image is None:
+                        continue
+                    for kind, suffix in (
+                        ("diffuse", prefs.import_diffuse_suffix),
+                        ("displace", prefs.import_displace_suffix),
+                        ("normal", prefs.import_normal_suffix),
+                    ):
+                        if suffix and suffix in node.image.name:
+                            # First match wins, so a later material slot cannot
+                            # silently replace an earlier one.
+                            textures.setdefault(kind, node.image)
 
-            for mat in obj.material_slots:
-                if mat.name:
-                    material = bpy.data.materials[mat.name]
-                    if material.use_nodes:
-                        for node in material.node_tree.nodes:
-                            if node.type in {'TEX_IMAGE'} and node.image:
-                                if (utils.prefs().import_diffuse_suffix) in node.image.name:
-                                    diff_texture = node.image
-                                if (utils.prefs().import_displace_suffix) in node.image.name:
-                                    disp_texture = node.image
-                                if (utils.prefs().import_normal_suffix) in node.image.name:
-                                    norm_texture = node.image
-                            elif node.type in {'GROUP'}:
-                                print("group found")
-            user_file_fomrat = scn.render.image_settings.file_format
+            previous_format = scn.render.image_settings.file_format
             scn.render.image_settings.file_format = 'BMP'
-            fileExt = '.bmp'
+            texture_ext = '.bmp'
+            try:
+                for kind, tag in (
+                    ("diffuse", b'\xc9\xaf\x00\x00'),
+                    ("displace", b'\xd9\xd6\x00\x00'),
+                    ("normal", b'\x51\xc3\x00\x00'),
+                ):
+                    image = textures.get(kind)
+                    if image is None:
+                        continue
+                    suffix = {
+                        "diffuse": prefs.import_diffuse_suffix,
+                        "displace": prefs.import_displace_suffix,
+                        "normal": prefs.import_normal_suffix,
+                    }[kind]
+                    texture_path = paths.join_goz_path(
+                        PATH_PROJECT, f"{obj.name}{suffix}{texture_ext}"
+                    )
+                    try:
+                        image.save_render(texture_path)
+                    except Exception as error:
+                        # Do not advertise a texture ZBrush cannot open.
+                        print(
+                            f"GoB: could not save the {kind} texture to "
+                            f"'{texture_path}': {error}"
+                        )
+                        continue
 
-            if diff_texture:
-                name = PATH_PROJECT + obj.name + utils.prefs().import_diffuse_suffix + fileExt
-                try:
-                    diff_texture.save_render(name)
-                    print(name)
-                except Exception as e:
-                    print(e)
-                name = name.encode('utf8')
-                goz_file.write(pack('<4B', 0xc9, 0xaf, 0x00, 0x00))
-                goz_file.write(pack('<I', len(name)+16))
-                goz_file.write(pack('<Q', 1))
-                goz_file.write(pack('%ss' % len(name), name))
-                if utils.prefs().performance_profiling:
-                    start_time = utils.profiler(start_time, "Write diff_texture")
+                    encoded = texture_path.encode('utf8')
+                    goz_file.write(tag)
+                    goz_file.write(pack('<I', len(encoded) + 16))
+                    goz_file.write(pack('<Q', 1))
+                    goz_file.write(pack('%ss' % len(encoded), encoded))
+                    if prefs.performance_profiling:
+                        start_time = utils.profiler(
+                            start_time, f"Write {kind}_texture"
+                        )
+            finally:
+                scn.render.image_settings.file_format = previous_format
 
-            if disp_texture:
-                name = PATH_PROJECT + obj.name + utils.prefs().import_displace_suffix + fileExt
-                try:
-                    disp_texture.save_render(name)
-                    print(name)
-                except Exception as e:
-                    print(e)
-                name = name.encode('utf8')
-                goz_file.write(pack('<4B', 0xd9, 0xd6, 0x00, 0x00))
-                goz_file.write(pack('<I', len(name)+16))
-                goz_file.write(pack('<Q', 1))
-                goz_file.write(pack('%ss' % len(name), name))
-                if utils.prefs().performance_profiling:
-                    start_time = utils.profiler(start_time, "Write disp_texture")
-
-            if norm_texture:
-                name = PATH_PROJECT + obj.name + utils.prefs().import_normal_suffix + fileExt
-                try:
-                    norm_texture.save_render(name)
-                    print(name)
-                except Exception as e:
-                    print(e)
-                name = name.encode('utf8')
-                goz_file.write(pack('<4B', 0x51, 0xc3, 0x00, 0x00))
-                goz_file.write(pack('<I', len(name)+16))
-                goz_file.write(pack('<Q', 1))
-                goz_file.write(pack('%ss' % len(name), name))
-                if utils.prefs().performance_profiling:
-                    start_time = utils.profiler(start_time, "Write norm_texture")
             # end
             goz_file.write(pack('16x'))
 
@@ -553,39 +554,43 @@ class GoB_OT_export(Operator):
                 print(30*"=")
 
         bpy.data.meshes.remove(mesh_tmp)
-        # restore user file format
-        scn.render.image_settings.file_format = user_file_fomrat
+        # The render format is restored by the finally block around the texture
+        # export above, so an exception there cannot leave it on BMP.
         return
 
     def execute(self, context):
 
         paths.set_goz_path_from_preferences()
 
+        # Resolve the GoZ root from the preferences instead of reading the
+        # module globals, so this cannot act on a path another caller has since
+        # replaced.
+        goz_root = paths.goz_root_from_preferences()
         PATH_PROJECT = utils.get_project_path()
 
         try:
             source_GoZ_Info = os.path.join(paths.PATH_GOB, "Blender")
-            target_GoZ_Info = os.path.join(paths.PATH_GOZ, "GoZApps", "Blender")
+            target_GoZ_Info = os.path.join(goz_root, "GoZApps", "Blender")
             print(source_GoZ_Info, target_GoZ_Info)
             shutil.copytree(source_GoZ_Info, target_GoZ_Info, symlinks=True)
         except FileExistsError:
             source_GoZ_Info = os.path.join(paths.PATH_GOB, "Blender", "GoZ_Info.txt")
-            target_GoZ_Info = os.path.join(paths.PATH_GOZ, "GoZApps", "Blender", "GoZ_Info.txt")
+            target_GoZ_Info = os.path.join(goz_root, "GoZApps", "Blender", "GoZ_Info.txt")
             shutil.copy2(source_GoZ_Info, target_GoZ_Info)
 
-            with open(os.path.join(paths.PATH_GOZ, "GoZApps", "Blender", "GoZ_Config.txt"), 'wt') as GoB_Config:
+            with open(os.path.join(goz_root, "GoZApps", "Blender", "GoZ_Config.txt"), 'wt') as GoB_Config:
                 blender_path = os.path.join(paths.PATH_BLENDER).replace('\\', '/')
                 GoB_Config.write(f'PATH = "{blender_path}"')
-            with open(os.path.join(paths.PATH_GOZ, "GoZBrush", "GoZ_Application.txt"), 'wt') as GoZ_Application:
+            with open(os.path.join(goz_root, "GoZBrush", "GoZ_Application.txt"), 'wt') as GoZ_Application:
                 GoZ_Application.write("Blender")
 
         except Exception as e:
             print(e)
 
-        with open(os.path.join(paths.PATH_GOZ, "GoZBrush", "GoZ_ProjectPath.txt"), 'wt') as GoZ_Application:
+        with open(os.path.join(goz_root, "GoZBrush", "GoZ_ProjectPath.txt"), 'wt') as GoZ_Application:
             GoZ_Application.write(PATH_PROJECT)
 
-        if utils.prefs().clean_project_path:
+        if utils.prefs().clean_project_path and os.path.isdir(PATH_PROJECT):
             for file_name in os.listdir(PATH_PROJECT):
                 if file_name.lower().endswith(('.goz', '.ztn', '.ztl')):
                     print('cleaning file:', file_name)
@@ -621,6 +626,20 @@ class GoB_OT_export(Operator):
         step =  100  / len(context.selected_objects)
         surface_types = ['SURFACE', 'CURVE', 'FONT', 'META']
 
+        def write_object_entry(obj_for_entry):
+            """Write the .ztn marker and append the object to the GoZ list.
+
+            ZBrush reads GoZ_ObjectList.txt, strips the project path prefix and
+            appends the extension itself, so the entry must be the path without
+            the extension. Building it with os.path.join means a project path
+            that lacks a trailing separator no longer produces an entry ZBrush
+            cannot resolve.
+            """
+            object_path = paths.join_goz_path(PATH_PROJECT, obj_for_entry.name)
+            with open(f"{object_path}.ztn", 'wt') as ztn:
+                ztn.write(object_path)
+            GoZ_ObjectList.write(f'{object_path}\n')
+
         with open(paths.PATH_OBJLIST, 'wt') as GoZ_ObjectList:
             for i, obj in enumerate(context.selected_objects):
                 if obj.type in surface_types:
@@ -638,9 +657,10 @@ class GoB_OT_export(Operator):
                         print("GoB: ", obj_tmp.name, mesh_tmp.name, len(mesh_tmp.polygons), sep=' / ')
                         self.escape_object_name(obj_tmp)
                         self.exportGoZ(context.scene, obj_tmp, f'{PATH_PROJECT}')
-                        with open( f"{PATH_PROJECT}{obj_tmp.name}.ztn", 'wt') as ztn:
-                            ztn.write(f'{PATH_PROJECT}{obj_tmp.name}')
-                        GoZ_ObjectList.write(f'{PATH_PROJECT}{obj_tmp.name}\n')
+                        write_object_entry(obj_tmp)
+                        # The temporary object is never linked to the scene, so
+                        # it has to be freed explicitly or every export leaks one.
+                        bpy.data.objects.remove(obj_tmp, do_unlink=True)
                         bpy.data.meshes.remove(mesh_tmp)
 
                 elif obj.type in {'MESH'}:
@@ -666,9 +686,7 @@ class GoB_OT_export(Operator):
 
                         self.escape_object_name(obj)
                         self.exportGoZ(context.scene, obj, f'{PATH_PROJECT}')
-                        with open( f"{PATH_PROJECT}{obj.name}.ztn", 'wt') as ztn:
-                            ztn.write(f'{PATH_PROJECT}{obj.name}')
-                        GoZ_ObjectList.write(f'{PATH_PROJECT}{obj.name}\n')
+                        write_object_entry(obj)
                     else:
                         ui.ShowReport(self, ["Object: ", obj.name], "GoB: ZBrush can not import objects without faces", 'COLORSET_01_VEC')
 

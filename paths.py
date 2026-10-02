@@ -89,6 +89,37 @@ def set_goz_path_from_preferences(preferences=None):
         set_goz_path(DEFAULT_PATH_GOZ)
 
 
+def join_goz_path(directory, *names):
+    """Join a GoZ path with names, in GoZ's forward-slash form.
+
+    The project path is a user-set preference whose default carries a trailing
+    slash. Every consumer used to rely on that with plain string concatenation,
+    so a project path typed without the trailing separator -- which the file
+    browser happily produces -- wrote the .ztn markers, the object list entries
+    and the exported textures next to the intended folder instead of inside it.
+
+    Forward slashes are kept deliberately: the path is handed to ZBrush both
+    inside the .GoZ file and through GoB_variables.zvr, and every other path the
+    add-on writes uses that form. Windows accepts forward slashes in file APIs,
+    so the same string works for opening the file here.
+    """
+    joined = os.path.join(os.fspath(directory), *names)
+    return joined.replace("\\", "/")
+
+
+def goz_root_from_preferences(preferences=None):
+    """Return the active platform's configured or default GoZ root.
+
+    Unlike set_goz_path_from_preferences this has no side effect, so callers
+    that just need the path do not have to read the module globals or worry
+    about another caller having changed them.
+    """
+    preferences = preferences or utils.prefs()
+    if preferences.custom_pixologoc_path:
+        return utils.get_pixologic_path(preferences)
+    return DEFAULT_PATH_GOZ
+
+
 def find_zbrush_user_asset_roots():
     """Return Maxon ZBrush 2026+ user-asset folders (Roaming/AppSupport)."""
     roots = []
