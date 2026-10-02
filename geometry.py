@@ -343,6 +343,41 @@ def _mesh_has_ngons(mesh: Mesh) -> bool:
     return bool(np.any(loop_totals > 4))
 
 
+def _capture_modifier(modifier):
+    """Record a modifier's name, type and writable settings.
+
+    obj.modifiers has no append(), so an APPLY_EXPORT export that clears the
+    modifiers has to rebuild them from saved values. Settings that cannot be
+    read or written on a rebuilt modifier are skipped rather than allowed to
+    abort the export.
+    """
+    settings = {}
+    for prop in modifier.bl_rna.properties:
+        if prop.identifier in {'rna_type', 'name'} or prop.is_readonly:
+            continue
+        try:
+            settings[prop.identifier] = getattr(modifier, prop.identifier)
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return modifier.name, modifier.type, settings
+
+
+def _restore_modifiers(obj, captured):
+    """Rebuild modifiers captured by _capture_modifier, in their old order."""
+    for name, modifier_type, settings in captured:
+        try:
+            modifier = obj.modifiers.new(name=name, type=modifier_type)
+        except (RuntimeError, TypeError):
+            continue
+        if modifier is None:
+            continue
+        for key, value in settings.items():
+            try:
+                setattr(modifier, key, value)
+            except (AttributeError, TypeError, ValueError):
+                continue
+
+
 def _attribute_values(attribute, data_type):
     values = np.empty(len(attribute.data), dtype=data_type)
     attribute.data.foreach_get('value', values)
@@ -384,9 +419,18 @@ def apply_modifiers(obj:Object) -> Mesh:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     object_eval = obj.evaluated_get(depsgraph)
     original_mesh = obj.data
+    original_modifiers = None
     uses_temporary_evaluated_mesh = False
 
     if utils.prefs().export_modifiers == 'APPLY_EXPORT':
+        # APPLY_EXPORT used to hand the object a throwaway mesh and clear its
+        # modifiers, then never put them back. The user's real mesh stayed
+        # behind as an orphan while the object pointed at the temporary one, so
+        # later edits went to a datablock the export no longer read: the second
+        # export repeated the first geometry and ZBrush received the old shape.
+        # Record what has to be restored. obj.modifiers has no append(), so the
+        # settings are captured and the modifiers rebuilt from them.
+        original_modifiers = [_capture_modifier(modifier) for modifier in obj.modifiers]
         mesh_tmp = bpy.data.meshes.new_from_object(object_eval)
         obj.data = mesh_tmp
         obj.modifiers.clear()
@@ -430,6 +474,11 @@ def apply_modifiers(obj:Object) -> Mesh:
             # to_mesh() results live outside the main database, so
             # to_mesh_clear() is the correct (and only) way to free them.
             obj.to_mesh_clear()
+        if original_modifiers is not None and obj.data is not original_mesh:
+            # Restore before returning: this path leaves early, and without the
+            # object would keep the throwaway mesh from APPLY_EXPORT.
+            obj.data = original_mesh
+            _restore_modifiers(obj, original_modifiers)
         if profiling:
             utils.profiler(start_total_time, "Make Mesh fast path\n _____/")
         return mesh_out
@@ -475,6 +524,11 @@ def apply_modifiers(obj:Object) -> Mesh:
 
     if uses_temporary_evaluated_mesh:
         obj.to_mesh_clear()
+    if original_modifiers is not None and obj.data is not original_mesh:
+        # Put the user's own mesh and modifiers back, so the object keeps
+        # pointing at the datablock they are editing.
+        obj.data = original_mesh
+        _restore_modifiers(obj, original_modifiers)
     if profiling:
         utils.profiler(start_total_time, "Make Mesh BMesh path\n _____/")
     return mesh_out
