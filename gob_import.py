@@ -27,11 +27,20 @@ import numpy as np
 from bpy.props import EnumProperty
 from bpy.types import Operator
 
-from . import geometry, nodes, paths, utils
+from . import geometry, mask_codec, nodes, paths, utils
 
 run_background_update = False
+# Kept for backwards compatibility with anything importing it; the sync state
+# now lives in _last_imported_paths and _last_seen_paths below.
 gob_import_cache = []
 cached_last_edition_time = time.perf_counter()
+# Last object-list contents the timer acted on, used to catch a rewrite whose
+# timestamp did not advance.
+_last_seen_paths = []
+# Revision of GoZ_ObjectList.txt whose contents have been fully imported, and
+# the paths actually imported so far. The timer notices a new revision; the
+# operator only imports what is genuinely outstanding.
+_last_imported_paths = []
 start_time = None
 
 
@@ -490,8 +499,14 @@ class GoB_OT_import(Operator):
             me.polygons.foreach_set("loop_total", loop_totals)
         me.update(calc_edges=True, calc_edges_loose=True)
 
-        # Apply transformations and validate mesh
-        me, _ = geometry.apply_transformation(me, is_import=True)
+        # Apply transformations and validate mesh. A mirroring axis remap
+        # reverses winding, which has to be corrected when the geometry was
+        # rebuilt above -- but not on an in-place coordinate update, where the
+        # winding is already correct and flipping again would toggle it on
+        # every sync and break the incremental path for good.
+        me, _ = geometry.apply_transformation(
+            me, is_import=True, flip_winding=not topology_matches
+        )
         me.transform(obj.matrix_world.inverted())
         me.validate(verbose=utils.prefs().debug_output)
 
@@ -867,7 +882,11 @@ class GoB_OT_import(Operator):
                             dtype="<u2",
                             count=payload_vertex_count,
                         )[:import_vertex_count]
-                        mask_weights = mask_records.astype(np.float32) / 65535.0
+                        # GoZ stores *unmaskedness*; Blender stores *maskedness*.
+                        # Reading the raw records straight into a group weight
+                        # stored the complement of the mask and flipped it on
+                        # every round trip.
+                        mask_weights = mask_codec.goz_to_bl_weight(mask_records)
 
                         # Create or clear vertex group for mask
                         if "mask" in obj.vertex_groups:
@@ -876,7 +895,11 @@ class GoB_OT_import(Operator):
 
                         # Blender accepts one weight per add() call. Group equal
                         # weights so common mask values are assigned in batches.
-                        weighted_indices = np.flatnonzero(mask_records < 65535)
+                        # A record of 65535 means "not masked", so those vertices
+                        # are deliberately left out of the group entirely.
+                        weighted_indices = np.flatnonzero(
+                            mask_records < mask_codec.UNMASKED_U16
+                        )
                         if len(weighted_indices):
                             weight_order = np.argsort(
                                 mask_records[weighted_indices], kind="stable"
@@ -892,10 +915,15 @@ class GoB_OT_import(Operator):
                             for vertex_indices in np.split(
                                 weighted_indices, weight_boundaries
                             ):
-                                raw_weight = int(mask_records[vertex_indices[0]])
                                 groupMask.add(
                                     vertex_indices.tolist(),
-                                    raw_weight / 65535.0,
+                                    float(
+                                        mask_codec.goz_to_bl_weight(
+                                            np.asarray(
+                                                [mask_records[vertex_indices[0]]]
+                                            )
+                                        )[0]
+                                    ),
                                     "REPLACE",
                                 )
 
@@ -1238,24 +1266,29 @@ class GoB_OT_import(Operator):
 
         paths.set_goz_path_from_preferences()
 
-        global gob_import_cache
-        goz_obj_paths = []
-        try:
-            with open(
-                os.path.join(paths.PATH_GOZ, "GoZBrush", "GoZ_ObjectList.txt"), "rt"
-            ) as goz_objs_list:
-                goz_obj_paths.extend(f"{line.strip()}.GoZ" for line in goz_objs_list)
-        except PermissionError:
-            if utils.prefs().debug_output:
-                print("GoB: GoZ_ObjectList already in use! Try again Later")
-        except Exception as e:
-            print(e)
+        goz_obj_paths, _list_mtime = read_goz_object_list()
 
         # Goz wipes this file before each export so it can be used to reset the import cache
         if not goz_obj_paths:
             if utils.prefs().debug_output:
                 self.report({"INFO"}, message="GoB: No goz files in GoZ_ObjectList")
             return {"CANCELLED"}
+
+        # Skip anything already imported. The timer only wakes us on a new
+        # revision of GoZ_ObjectList.txt; this decides what is genuinely new.
+        if self.action == "AUTO":
+            pending = _pending_goz_paths(goz_obj_paths)
+            if not pending:
+                if utils.prefs().debug_output:
+                    self.report({"INFO"}, "GoB: nothing new to import")
+                return {"CANCELLED"}
+            if utils.prefs().debug_output:
+                print(f"GOB: {len(pending)} new path(s) since last import")
+        else:
+            # A manual import is an explicit "import what is there right now",
+            # so the previously-imported bookkeeping does not apply.
+            _last_imported_paths = []
+            pending = list(goz_obj_paths)
 
         currentContext = None
         if context.object:
@@ -1272,17 +1305,25 @@ class GoB_OT_import(Operator):
 
         wm = context.window_manager
         wm.progress_begin(0, 100)
-        step = 100 / len(goz_obj_paths)
-        for i, ztool_path in enumerate(goz_obj_paths):
-            if ztool_path not in gob_import_cache:
-                gob_import_cache.append(ztool_path)
+        step = 100 / len(pending)
+        imported = []
+        try:
+            for i, ztool_path in enumerate(pending):
                 self.GoZit(ztool_path)
-            wm.progress_update(step * i)
-        wm.progress_end()
+                imported.append(ztool_path)
+                wm.progress_update(step * i)
+        finally:
+            # Always end the progress bar and restore the user's mode, even if
+            # one object failed to import.
+            wm.progress_end()
+            if context.object and currentContext:
+                bpy.ops.object.mode_set(mode=currentContext)
 
-        # restore object context
-        if context.object and currentContext:
-            bpy.ops.object.mode_set(mode=currentContext)
+            if imported:
+                # Record only what actually completed, so a failure part-way
+                # through leaves the rest outstanding for the next poll instead
+                # of being marked done.
+                _commit_imported_paths(imported)
 
         if utils.prefs().debug_output:
             self.report({"INFO"}, "GoB: Imoprt cycle finished")
@@ -1334,9 +1375,81 @@ class GoB_OT_import(Operator):
             return {"FINISHED"}
 
 
+def read_goz_object_list():
+    """Return the .GoZ paths listed by ZBrush, plus the file's mtime.
+
+    ZBrush rewrites GoZ_ObjectList.txt from scratch on every export, so the
+    file's contents are the whole pending set and its mtime is only useful as a
+    cheap "did anything change" probe.
+    """
+
+    object_list_path = os.path.join(paths.PATH_GOZ, "GoZBrush", "GoZ_ObjectList.txt")
+    try:
+        with open(object_list_path, "rt") as goz_objs_list:
+            paths_found = [
+                f"{line.strip()}.GoZ" for line in goz_objs_list if line.strip()
+            ]
+    except PermissionError:
+        if utils.prefs().debug_output:
+            print("GoB: GoZ_ObjectList already in use! Try again later")
+        return [], None
+    except FileNotFoundError:
+        return [], None
+    except Exception as error:
+        print(error)
+        return [], None
+
+    try:
+        mtime = os.path.getmtime(object_list_path)
+    except OSError:
+        mtime = None
+    return paths_found, mtime
+
+
+def _pending_goz_paths(paths_found):
+    """Return the paths that still need importing.
+
+    Tracking what was actually imported replaces the previous behaviour of
+    clearing a cache on a later idle timer tick. That scheme lost work: the
+    mtime was consumed before the import ran, and two exports landing inside one
+    poll interval (or a write during a slow import) were never retried.
+    """
+
+    already_done = set(_last_imported_paths)
+    return [path for path in paths_found if path not in already_done]
+
+
+def _commit_imported_paths(imported):
+    """Record a completed import so the next poll knows what is already done."""
+
+    for path in imported:
+        if path not in _last_imported_paths:
+            _last_imported_paths.append(path)
+
+
+def _revision_changed(paths_found, mtime):
+    """Return whether the object list genuinely moved on.
+
+    An mtime bump is the cheap signal. When the timestamp does not advance (NTFS
+    resolution, or a same-second rewrite) the content is compared as well, since
+    ZBrush rewrites this file from scratch on every export.
+    """
+
+    global cached_last_edition_time, _last_seen_paths
+
+    try:
+        moved = mtime is not None and mtime > cached_last_edition_time
+    except TypeError:
+        moved = True
+
+    if moved:
+        return True
+    return list(paths_found) != list(_last_seen_paths)
+
+
 def run_import_periodically():
     # print("Runing timers update check")
-    global cached_last_edition_time, run_background_update
+    global cached_last_edition_time, _last_seen_paths, run_background_update
     paths.set_goz_path_from_preferences()
 
     try:
@@ -1349,23 +1462,19 @@ def run_import_periodically():
             bpy.app.timers.unregister(run_import_periodically)
         return utils.prefs().import_timer
 
-    if file_edition_time > cached_last_edition_time:
+    paths_found, _ = read_goz_object_list()
+    if _revision_changed(paths_found, file_edition_time):
+        # A fresh export may still be being written. Remember only the fact
+        # that the file moved, and let the operator commit what it actually
+        # imported; consuming the exact mtime here would swallow any write made
+        # while the import is running.
         cached_last_edition_time = file_edition_time
+        _last_seen_paths = list(paths_found)
         bpy.ops.scene.gob_import()  # only call operator update is found (executing operatros is slow)
-    else:
-        global gob_import_cache
-        if gob_import_cache:
-            if utils.prefs().debug_output:
-                print(
-                    "GOZ: clear import cache",
-                    file_edition_time - cached_last_edition_time,
-                )
-            gob_import_cache.clear()  # reset import cache
-        elif utils.prefs().debug_output:
-            print(
-                "GOZ: Nothing to update", file_edition_time - cached_last_edition_time
-            )
-        return utils.prefs().import_timer
+    elif utils.prefs().debug_output:
+        print(
+            "GOZ: Nothing to update", file_edition_time - cached_last_edition_time
+        )
 
     if not run_background_update and bpy.app.timers.is_registered(
         run_import_periodically
@@ -1376,5 +1485,9 @@ def run_import_periodically():
 
 
 def run_import_manually():
+    """Force a one-off import of everything currently listed by ZBrush."""
+
+    global _last_imported_paths
+    _last_imported_paths = []
     gob_import_cache.clear()
     bpy.ops.scene.gob_import()  # only call operator update is found (executing operatros is slow)

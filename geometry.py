@@ -233,11 +233,24 @@ def _axis_remap_matrix():
     return matrix
 
 
-def apply_transformation(me, is_import=True):
-    """Apply reciprocal GoZ axis, unit-scale, remapping, and flip transforms."""
+def apply_transformation(me, is_import=True, flip_winding=None):
+    """Apply reciprocal GoZ axis, unit-scale, remapping, and flip transforms.
+
+    ``flip_winding`` controls the reflected-winding correction. A mirroring
+    remap reverses face winding, and ``Mesh.transform`` does *not* compensate
+    for it, so a rebuild needs the flip. An in-place coordinate update must
+    not flip again: repeating it on the same mesh toggles the winding on every
+    import, which makes ``mesh_topology_matches`` fail forever after and
+    forces a full rebuild (losing vertex groups) on every subsequent sync.
+
+    Defaults to flipping, which is the correct behaviour when the caller has
+    just rebuilt the geometry.
+    """
 
     import_scale = _import_scale_factor()
     remap_matrix = _axis_remap_matrix()
+    if flip_winding is None:
+        flip_winding = True
 
     if is_import:
         # This is the inverse of the export sequence: unit scale is applied
@@ -259,9 +272,10 @@ def apply_transformation(me, is_import=True):
             @ remap_matrix.inverted()
         )
 
-    # A reflection reverses winding in either direction. Positive unit scales
-    # do not affect this determinant, so normals are handled only once here.
-    if remap_matrix.determinant() < 0.0:
+    # A reflection reverses winding in either direction, and Mesh.transform
+    # leaves the vertex order alone, so a mirrored remap has to be corrected
+    # explicitly. Positive unit scales do not affect this determinant.
+    if flip_winding and remap_matrix.determinant() < 0.0:
         me.flip_normals()
 
     return me, None if is_import else mat_transform
@@ -353,7 +367,11 @@ def _set_sculpt_mask_attribute(mesh: Mesh, values):
 
 
 def apply_modifiers(obj:Object) -> Mesh:
-    """Return an export mesh, triangulating only when n-gons require it."""
+    """Return an export mesh, triangulating only when n-gons require it.
+
+    The returned mesh is always a newly created datablock that the caller owns;
+    the user's own ``obj.data`` is never handed back.
+    """
 
     profiling = utils.prefs().performance_profiling
     if profiling:
@@ -409,6 +427,8 @@ def apply_modifiers(obj:Object) -> Mesh:
         if sculpt_mask_values is not None:
             _set_sculpt_mask_attribute(mesh_out, sculpt_mask_values)
         if uses_temporary_evaluated_mesh:
+            # to_mesh() results live outside the main database, so
+            # to_mesh_clear() is the correct (and only) way to free them.
             obj.to_mesh_clear()
         if profiling:
             utils.profiler(start_total_time, "Make Mesh fast path\n _____/")

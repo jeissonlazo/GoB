@@ -1,0 +1,17 @@
+# Normalise line endings so the extension does not ship a mix of CRLF and LF.
+# Blender's extension builder only needs the Python sources to be readable, but
+# a consistent checkout keeps diffs meaningful.
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+
+# ZBrush plugin binaries must never be rewritten.
+*.dll   binary
+*.lib   binary
+*.zsc   binary
+
+# Export templates and ZScript variable files are generated at runtime.
+ZScripts/GoB_Import_Settings.zvr binary

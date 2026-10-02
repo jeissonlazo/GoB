@@ -25,7 +25,7 @@ from struct import pack
 from subprocess import Popen
 from bpy.types import Operator
 from bpy.props import BoolProperty
-from . import paths, utils, geometry, ui, gob_import
+from . import geometry, mask_codec, paths, utils, ui, gob_import
 
 
 _EXPORT_VERTEX_CHUNK = 1_000_000
@@ -317,7 +317,7 @@ class GoB_OT_export(Operator):
                         mask_data[:] = [0.0] * len(mask_data)
 
                     np.maximum(mask_data, 0.0, out=mask_data)
-                    mask_values = ((1.0 - mask_data) * 65535).astype('<u2')
+                    mask_values = mask_codec.bl_to_goz_mask(mask_data)
                     goz_file.write(mask_values.tobytes())
 
                 else:
@@ -326,19 +326,24 @@ class GoB_OT_export(Operator):
                             goz_file.write(pack('<4B', 0x32, 0x75, 0x00, 0x00))
                             goz_file.write(pack('<I', numVertices*2+16))
                             goz_file.write(pack('<Q', numVertices))
-                            mask_values = np.full(
-                                numVertices, 65535, dtype=np.uint16
-                            )
-                            for i in range(numVertices):
-                                try:
-                                    mask_values[i] = int(
-                                        (1.0 - vertexGroup.weight(i)) * 65535
-                                    )
-                                except RuntimeError:
-                                    pass
-                            goz_file.write(
-                                mask_values.astype('<u2', copy=False).tobytes()
-                            )
+                            # Vertices outside the group are unmasked, so start
+                            # from zeros and fill only the members.
+                            mask_data = np.zeros(numVertices, dtype=np.float32)
+                            group_index = vertexGroup.index
+                            member_count = 0
+                            for vertex in mesh_tmp.vertices:
+                                for membership in vertex.groups:
+                                    if membership.group == group_index:
+                                        mask_data[vertex.index] = membership.weight
+                                        member_count += 1
+                                        break
+                            if not member_count and utils.prefs().debug_output:
+                                print(
+                                    "GoB: 'mask' vertex group has no weights; "
+                                    "exporting an unmasked mesh."
+                                )
+                            mask_values = mask_codec.bl_to_goz_mask(mask_data)
+                            goz_file.write(mask_values.tobytes())
 
             if utils.prefs().performance_profiling:
                 start_time = utils.profiler(start_time, "Write Mask")

@@ -2,7 +2,7 @@
 schema_version = "1.0.0"
 id = "gob"
 name = "GoB"
-version = "4.5.4"
+version = "4.6.0"
 tagline = "GoB providing a bridge between ZBrush and Blender"
 maintainer = "Daniel Grauer (kromar) and Jamie Phipps (Boozebeard)"
 type = "add-on"
@@ -20,10 +20,13 @@ copyright = ["2024 Jose Conseco", "2024 Daniel Grauer (kromar)"]
   ".zed/",
   "__pycache__/",
   ".gitignore",
+  ".gitattributes",
   "README.md",
   "LICENSE.md",
   "*.psd", "*.kra", "*.blend",
   "ZScripts/GoB_Import_Settings.zvr",
   "build",
   "tests",
+  "tools",
+  ".agents",
   ]
