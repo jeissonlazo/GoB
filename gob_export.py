@@ -560,6 +560,86 @@ class GoB_OT_export(Operator):
         # export above, so an exception there cannot leave it on BMP.
         return
 
+    def _prepare_goz_directories(self, goz_root):
+        """Make sure the folders the handshake writes into exist.
+
+        Without this a missing GoZBrush or GoZApps folder -- which happens when
+        the public Pixologic folder is deleted, moved, or never created because
+        ZBrush has not run yet -- made the export die with a bare
+        FileNotFoundError from somewhere in the middle of the operator.
+        """
+        for relative in ("GoZBrush", os.path.join("GoZApps", "Blender")):
+            directory = os.path.join(goz_root, relative)
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except OSError as error:
+                print(f"GoB: could not create {directory}: {error}")
+                return False
+        return True
+
+    def _write_app_registration(self, goz_root):
+        """Write the files that tell ZBrush Blender is the GoZ target app."""
+        app_dir = os.path.join(goz_root, "GoZApps", "Blender")
+        source_info = os.path.join(paths.PATH_GOB, "Blender", "GoZ_Info.txt")
+        target_info = os.path.join(app_dir, "GoZ_Info.txt")
+
+        # Refresh GoZ_Info.txt, and create it the first time.
+        try:
+            if os.path.isdir(os.path.join(paths.PATH_GOB, "Blender")):
+                shutil.copy2(source_info, target_info)
+        except OSError as error:
+            print(f"GoB: could not refresh GoZ_Info.txt: {error}")
+
+        blender_path = os.fspath(paths.PATH_BLENDER).replace('\\', '/')
+        try:
+            with open(os.path.join(app_dir, "GoZ_Config.txt"), 'wt') as config:
+                config.write(f'PATH = "{blender_path}"')
+            with open(
+                os.path.join(goz_root, "GoZBrush", "GoZ_Application.txt"), 'wt'
+            ) as application:
+                application.write("Blender")
+        except OSError as error:
+            print(f"GoB: could not register Blender with GoZ: {error}")
+
+    def _write_project_path(self, goz_root, project_path):
+        try:
+            with open(
+                os.path.join(goz_root, "GoZBrush", "GoZ_ProjectPath.txt"), 'wt'
+            ) as project_file:
+                project_file.write(project_path)
+        except OSError as error:
+            print(f"GoB: could not write GoZ_ProjectPath.txt: {error}")
+
+    def _set_import_as_subtool(self):
+        """Set IMPORT_AS_SUBTOOL in GoZBrush\\GoZ_Config.txt.
+
+        ZBrush creates this file; before it has run it may not exist. The old
+        code caught that and then wrote the wrong file, so the setting silently
+        never took effect on a fresh install.
+        """
+        import_as_subtool = 'IMPORT_AS_SUBTOOL = TRUE'
+        import_as_tool = 'IMPORT_AS_SUBTOOL = FALSE'
+
+        try:
+            with open(paths.PATH_CONFIG, "rt") as handle:
+                config = handle.read().replace('\t', ' ')
+        except OSError:
+            # Not there yet: start from the setting ZBrush defaults to.
+            config = f"SHOW_HELP_WINDOW = FALSE\n{import_as_subtool}\n"
+
+        if self.as_tool:
+            new_config = config.replace(import_as_subtool, import_as_tool)
+        else:
+            new_config = config.replace(import_as_tool, import_as_subtool)
+        if new_config == config and not self.as_tool:
+            new_config = config.rstrip("\n") + f"\n{import_as_subtool}\n"
+
+        try:
+            with open(paths.PATH_CONFIG, "wt") as handle:
+                handle.write(new_config)
+        except OSError as error:
+            print(f"GoB: could not write {paths.PATH_CONFIG}: {error}")
+
     def execute(self, context):
 
         paths.set_goz_path_from_preferences()
@@ -570,27 +650,31 @@ class GoB_OT_export(Operator):
         goz_root = paths.goz_root_from_preferences()
         PATH_PROJECT = utils.get_project_path()
 
-        try:
-            source_GoZ_Info = os.path.join(paths.PATH_GOB, "Blender")
-            target_GoZ_Info = os.path.join(goz_root, "GoZApps", "Blender")
-            print(source_GoZ_Info, target_GoZ_Info)
-            shutil.copytree(source_GoZ_Info, target_GoZ_Info, symlinks=True)
-        except FileExistsError:
-            source_GoZ_Info = os.path.join(paths.PATH_GOB, "Blender", "GoZ_Info.txt")
-            target_GoZ_Info = os.path.join(goz_root, "GoZApps", "Blender", "GoZ_Info.txt")
-            shutil.copy2(source_GoZ_Info, target_GoZ_Info)
+        if not self._prepare_goz_directories(goz_root):
+            ui.ShowReport(
+                self,
+                [goz_root],
+                "GoB: cannot write to the GoZ folder",
+                'COLORSET_01_VEC',
+            )
+            return {'CANCELLED'}
 
-            with open(os.path.join(goz_root, "GoZApps", "Blender", "GoZ_Config.txt"), 'wt') as GoB_Config:
-                blender_path = os.path.join(paths.PATH_BLENDER).replace('\\', '/')
-                GoB_Config.write(f'PATH = "{blender_path}"')
-            with open(os.path.join(goz_root, "GoZBrush", "GoZ_Application.txt"), 'wt') as GoZ_Application:
-                GoZ_Application.write("Blender")
+        for directory in (goz_root, PATH_PROJECT):
+            if not os.path.isdir(directory):
+                try:
+                    os.makedirs(directory, exist_ok=True)
+                except OSError as error:
+                    print(f"GoB: could not create {directory}: {error}")
+                    ui.ShowReport(
+                        self,
+                        [directory],
+                        "GoB: project folder is not writable",
+                        'COLORSET_01_VEC',
+                    )
+                    return {'CANCELLED'}
 
-        except Exception as e:
-            print(e)
-
-        with open(os.path.join(goz_root, "GoZBrush", "GoZ_ProjectPath.txt"), 'wt') as GoZ_Application:
-            GoZ_Application.write(PATH_PROJECT)
+        self._write_app_registration(goz_root)
+        self._write_project_path(goz_root, PATH_PROJECT)
 
         if utils.prefs().clean_project_path and os.path.isdir(PATH_PROJECT):
             for file_name in os.listdir(PATH_PROJECT):
@@ -598,24 +682,7 @@ class GoB_OT_export(Operator):
                     print('cleaning file:', file_name)
                     os.remove(os.path.join(PATH_PROJECT, file_name))
 
-        import_as_subtool = 'IMPORT_AS_SUBTOOL = TRUE'
-        import_as_tool = 'IMPORT_AS_SUBTOOL = FALSE'
-
-        try:
-            with open(paths.PATH_CONFIG) as r:
-                r = r.read().replace('\t', ' ')
-                if self.as_tool:
-                    new_config = r.replace(import_as_subtool, import_as_tool)
-                else:
-                    new_config = r.replace(import_as_tool, import_as_subtool)
-
-            with open(paths.PATH_CONFIG, "w") as w:
-                w.write(new_config)
-
-        except Exception as e:
-            print("Goz config missing, writing file ", e)
-            with open(os.path.join(paths.PATH_GOZ, "GoZApps", "Blender", "GoZ_Config.txt"), 'wt') as GoB_Config:
-                GoB_Config.write(f"PATH = \'{paths.PATH_BLENDER}\'")
+        self._set_import_as_subtool()
 
         currentContext = None
         if context.object:

@@ -128,7 +128,16 @@ class GOB_OT_Popup(Operator):
         # Open the preferences window and show the add-on settings
         bpy.ops.preferences.addon_show(module=__package__)
 
-    def invoke(self, context, event):       
+    def invoke(self, context, event):
+        # A modal dialog cannot be shown without a UI; say so instead of
+        # letting Blender crash while building the dialog.
+        if not can_show_dialogs():
+            print(
+                "GoB: ZBrush path is not configured. Set it in the GoB add-on "
+                "preferences (Edit > Preferences > Add-ons > GoB)."
+            )
+            return {'CANCELLED'}
+
         wm = context.window_manager
         if bpy.app.version < (4,3,0): 
             font_size_correction = bpy.context.preferences.ui_styles[0].widget_label.points / 10
@@ -142,10 +151,39 @@ class GOB_OT_Popup(Operator):
         return {'FINISHED'}
 
 
+def can_show_dialogs():
+    """Whether a popup can safely be shown.
+
+    ``window_manager`` and even ``window_manager.windows`` exist in
+    ``--background`` runs, so neither is a usable test. Measured on Blender
+    5.2.2: calling ``popup_menu`` in background mode does not raise, it takes
+    Blender down with an EXCEPTION_ACCESS_VIOLATION while resolving the popup
+    icon, even for a valid icon such as ``'INFO'``. Background mode is therefore
+    the thing to check, and anything that reports to the user must consult this
+    first.
+    """
+    try:
+        if bpy.app.background:
+            return False
+        return bool(bpy.context.window_manager.windows)
+    except (AttributeError, RuntimeError):
+        return False
+
+
 def ShowReport(self, message = [], title = "Message Box", icon = 'INFO'):
+    """Show a popup, or fall back to the console when there is no window."""
+    text = " | ".join(str(part) for part in message)
+
+    if not can_show_dialogs():
+        print(f"GoB: {title}: {text}")
+        return
+
     def draw(self, context):
         for i in message:
-            self.layout.label(text=i)
-    bpy.context.window_manager.popup_menu(draw, title = title, icon = icon)
+            self.layout.label(text=str(i))
+    try:
+        bpy.context.window_manager.popup_menu(draw, title = title, icon = icon)
+    except (RuntimeError, AttributeError, TypeError) as error:
+        print(f"GoB: {title}: {text} (popup unavailable: {error})")
 
 
