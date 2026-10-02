@@ -1,4 +1,4 @@
-﻿# ##### BEGIN GPL LICENSE BLOCK #####
+# ##### BEGIN GPL LICENSE BLOCK #####
 #
 #  This program is free software; you can redistribute it and/or
 #  modify it under the terms of the GNU General Public License
@@ -22,9 +22,7 @@ import string
 import time
 from struct import unpack_from
 
-import bmesh
 import bpy
-import mathutils
 import numpy as np
 from bpy.props import EnumProperty
 from bpy.types import Operator
@@ -292,10 +290,9 @@ def _load_goz_texture(goz_file, operator, texture_type, texture_name):
         )
         return None
 
-    texture = bpy.data.textures.get(texture_name)
-    if texture is None:
-        texture = bpy.data.textures.new(texture_name, "IMAGE")
-    texture.image = image
+    # The legacy bpy.data.textures datablock is deliberately not created here:
+    # the material graph is built from image nodes in nodes.py, so a Texture
+    # datablock was allocated per texture on every sync and never read.
     return image
 
 
@@ -479,12 +476,7 @@ class GoB_OT_import(Operator):
         else:
             # Rebuild whenever topology differs. Preserving weights by index in
             # this case could silently attach them to different vertices.
-            if bpy.app.version >= (3, 6, 0):
-                me.clear_geometry()
-            else:
-                me.vertices.clear()
-                me.edges.clear()
-                me.polygons.clear()
+            me.clear_geometry()
 
             loop_starts, loop_totals, loop_vertices = decoded_faces
             me.vertices.add(len(vertsData))
@@ -810,67 +802,34 @@ class GoB_OT_import(Operator):
 
                         # Assign colors
                         if import_vertex_count:
-                            if bpy.app.version < (3, 4, 0):
-                                polypaintData = polypaint_colors.tolist()
-                                bm = bmesh.new()
-                                bm.from_mesh(me)
-                                bm.faces.ensure_lookup_table()
-                                if me.vertex_colors:
-                                    if (
-                                        utils.prefs().import_polypaint_name
-                                        in me.vertex_colors
-                                    ):
-                                        color_layer = bm.loops.layers.color.get(
-                                            utils.prefs().import_polypaint_name
-                                        )
-                                    else:
-                                        color_layer = bm.loops.layers.color.new(
-                                            utils.prefs().import_polypaint_name
-                                        )
-                                else:
-                                    color_layer = bm.loops.layers.color.new(
-                                        utils.prefs().import_polypaint_name
-                                    )
+                            color_attribute = me.color_attributes.get(
+                                utils.prefs().import_polypaint_name
+                            )
+                            if (
+                                color_attribute is not None
+                                and color_attribute.domain != "POINT"
+                            ):
+                                me.color_attributes.remove(color_attribute)
+                                color_attribute = None
+                            if color_attribute is None:
+                                color_attribute = me.color_attributes.new(
+                                    utils.prefs().import_polypaint_name,
+                                    "BYTE_COLOR",
+                                    "POINT",
+                                )
 
-                                for face in bm.faces:
-                                    for loop in face.loops:
-                                        if loop.vert.index < len(polypaintData):
-                                            loop[color_layer] = polypaintData[
-                                                loop.vert.index
-                                            ]
-
-                                bm.to_mesh(me)
-                                bm.free()
-                                me.update(calc_edges=True, calc_edges_loose=True)
-                            else:
-                                color_attribute = me.color_attributes.get(
-                                    utils.prefs().import_polypaint_name
-                                )
-                                if (
-                                    color_attribute is not None
-                                    and color_attribute.domain != "POINT"
-                                ):
-                                    me.color_attributes.remove(color_attribute)
-                                    color_attribute = None
-                                if color_attribute is None:
-                                    color_attribute = me.color_attributes.new(
-                                        utils.prefs().import_polypaint_name,
-                                        "BYTE_COLOR",
-                                        "POINT",
-                                    )
-
-                                color_values = np.empty(
-                                    len(color_attribute.data) * 4,
-                                    dtype=np.float32,
-                                )
-                                color_attribute.data.foreach_get(
-                                    "color_srgb", color_values
-                                )
-                                color_values = color_values.reshape((-1, 4))
-                                color_values[:import_vertex_count] = polypaint_colors
-                                color_attribute.data.foreach_set(
-                                    "color_srgb", color_values.reshape(-1)
-                                )
+                            color_values = np.empty(
+                                len(color_attribute.data) * 4,
+                                dtype=np.float32,
+                            )
+                            color_attribute.data.foreach_get(
+                                "color_srgb", color_values
+                            )
+                            color_values = color_values.reshape((-1, 4))
+                            color_values[:import_vertex_count] = polypaint_colors
+                            color_attribute.data.foreach_set(
+                                "color_srgb", color_values.reshape(-1)
+                            )
 
                         if utils.prefs().performance_profiling:
                             start_time = utils.profiler(start_time, "Polypaint Assign")
@@ -1045,9 +1004,7 @@ class GoB_OT_import(Operator):
                                     1,
                                 )
                                 objMat.diffuse_color = rgba
-                                objMat.node_tree.nodes["Principled BSDF"].inputs[
-                                    0
-                                ].default_value = rgba
+                                nodes.set_node_base_color(objMat, rgba)
                             material_slot_indices[pgmat] = obj.material_slots[
                                 str(pgmat)
                             ].slot_index
@@ -1249,7 +1206,7 @@ class GoB_OT_import(Operator):
                             objMat = bpy.data.materials.new(objName)
                             obj.data.materials.append(objMat)
 
-                        nodes.materail_from_polypaint(objMat)
+                        nodes.material_from_polypaint(objMat)
 
                 # TEXTURES
                 elif utils.prefs().import_material == "TEXTURES":
@@ -1264,7 +1221,7 @@ class GoB_OT_import(Operator):
                         obj.data.materials.append(objMat)
 
                     print("create material node:", objMat)
-                    nodes.material_fromm_texture(
+                    nodes.material_from_texture(
                         objMat, diff_texture, norm_texture, disp_texture
                     )
 

@@ -263,40 +263,7 @@ class GoB_OT_export(Operator):
                 start_time = utils.profiler(start_time, "Write UV")
 
             # --Polypaint--
-            if bpy.app.version < (3,4,0):
-                if mesh_tmp.vertex_colors.active:
-                    vcoldata = mesh_tmp.vertex_colors.active.data # color[loop_id]
-                    vcolArray = bytearray([0] * numVertices * 3)
-                    # fill vcArray(vert_idx + rgb_offset) = color_xyz
-                    for loop in mesh_tmp.loops: #in the end we will fill verts with last vert_loop color
-                        vert_idx = loop.vertex_index
-                        vcolArray[vert_idx*3] = int(255*vcoldata[loop.index].color[0])
-                        vcolArray[vert_idx*3+1] = int(255*vcoldata[loop.index].color[1])
-                        vcolArray[vert_idx*3+2] = int(255*vcoldata[loop.index].color[2])
-
-                    if utils.prefs().performance_profiling:
-                        start_time = utils.profiler(start_time, "    Polypaint:  loop")
-
-                    goz_file.write(pack('<4B', 0xb9, 0x88, 0x00, 0x00))
-                    goz_file.write(pack('<I', numVertices*4+16))
-                    goz_file.write(pack('<I', numVertices))
-                    goz_file.write(pack("<f", 0))
-                    if utils.prefs().performance_profiling:
-                        start_time = utils.profiler(start_time, "    Polypaint:  write numVertices")
-
-                    for i in range(0, len(vcolArray), 3):
-                        goz_file.write(pack('<B', vcolArray[i+2]))
-                        goz_file.write(pack('<B', vcolArray[i+1]))
-                        goz_file.write(pack('<B', vcolArray[i]))
-                        goz_file.write(pack('<B', 0))
-                    if utils.prefs().performance_profiling:
-                        start_time = utils.profiler(start_time, "    Polypaint: write color")
-
-                    vcolArray.clear()
-                    if utils.prefs().performance_profiling:
-                        start_time = utils.profiler(start_time, "    Polypaint:  vcolArray.clear")
-
-            elif obj.data.color_attributes.active_color_name and obj.data.color_attributes.active_color_index >= 0:
+            if obj.data.color_attributes.active_color_name and obj.data.color_attributes.active_color_index >= 0:
 
                 vcolArray = geometry.get_vertex_colors(mesh_tmp, obj, numVertices)
                 if utils.prefs().performance_profiling:
@@ -684,9 +651,13 @@ class GoB_OT_export(Operator):
                         geometry.process_linked_objects(obj)
                         geometry.remove_internal_faces(obj)
 
-                        if bpy.ops.geometry.color_attribute_convert.poll():
-                            bpy.ops.geometry.color_attribute_convert(domain='POINT', data_type='FLOAT_COLOR')
-                            obj.data.update()
+                        # No bpy.ops.geometry.color_attribute_convert() here.
+                        # That operator acts on the *active* object rather than
+                        # the one being exported, so with several objects
+                        # selected it converted the wrong datablock N times and
+                        # permanently modified the user's mesh. The exporter
+                        # already reads BYTE/CORNER colors correctly through
+                        # geometry.get_vertex_colors().
 
                         self.escape_object_name(obj)
                         self.exportGoZ(context.scene, obj, f'{PATH_PROJECT}')

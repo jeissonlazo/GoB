@@ -24,9 +24,32 @@ import addon_utils
 import platform
 
 
+# Allows a test harness running the add-on headless to supply preferences.
+# Blender only creates the add-on preferences entry when the extension is
+# enabled through the normal add-on system, which is not always available in
+# ``--background`` runs.
+_TEST_PREFS = None
+
+
 def prefs():
-    user_preferences = bpy.context.preferences
-    return user_preferences.addons[__package__].preferences 
+    """Return the GoB add-on preferences.
+
+    Raises a descriptive RuntimeError instead of a bare KeyError when the
+    add-on is not registered, which is the failure mode seen when a persistent
+    timer keeps running after the add-on is disabled.
+    """
+    if _TEST_PREFS is not None:
+        return _TEST_PREFS
+
+    addons = bpy.context.preferences.addons
+    try:
+        return addons[__package__].preferences
+    except KeyError:
+        raise RuntimeError(
+            f"GoB: preferences for {__package__!r} are unavailable because the "
+            "add-on is not enabled. Enable GoB in Preferences > Add-ons and "
+            "retry."
+        ) from None
 
 
 def platform_path_storage_key(property_name, system=None):
