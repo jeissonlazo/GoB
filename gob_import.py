@@ -57,12 +57,19 @@ def _report_import_warning(operator, message):
         pass
 
 
-def _read_goz_section(goz_file, operator, section_name):
+def _read_goz_section(goz_file, operator, section_name, *, count_is_u32=False):
     """Read one GoZ section without allowing it to consume the next tag.
 
-    The section tag has already been read by the caller. GoZ's stored section
-    length includes that four-byte tag, the four-byte length, and the
+    The section tag has already been read by the caller. For most sections GoZ's
+    stored length includes the four-byte tag, the four-byte length and an
     eight-byte element count, leaving ``length - 16`` payload bytes.
+
+    The polypaint section is the exception, and it is why this has a flag: it
+    writes a four-byte count followed by a four-byte float. Reading eight bytes
+    of count there swallowed that float, reported a nonsense count
+    (4575657221408423944 for a mesh of 8 vertices) and -- because the callers
+    use the same reader to skip a section they are not importing -- left the
+    stream four bytes out of step for everything after it.
     """
 
     header = goz_file.read(12)
@@ -75,7 +82,10 @@ def _read_goz_section(goz_file, operator, section_name):
         return 0, b""
 
     section_length = unpack_from("<I", header, 0)[0]
-    element_count = unpack_from("<Q", header, 4)[0]
+    if count_is_u32:
+        element_count = unpack_from("<I", header, 4)[0]
+    else:
+        element_count = unpack_from("<Q", header, 4)[0]
     if section_length < 16:
         _report_import_warning(
             operator,
@@ -177,7 +187,7 @@ def _read_goz_object_name(goz_file, operator):
         offset 36   <I  length = len(name) + 24
         offset 40   <Q  count
         offset 48   b"GoZMesh_" + name        8 + len(name) bytes
-        offset 71   <4B 0x89 0x13 0x00 0x00   trailer  \  a 20-byte block that
+        offset 71   <4B 0x89 0x13 0x00 0x00   trailer  ]  a 20-byte block that
                     <I 20, <Q 1, <I 0          the importer consumes here
         offset 91   first mesh section tag
 
@@ -816,8 +826,10 @@ class GoB_OT_import(Operator):
                     if utils.prefs().debug_output:
                         print("Import Polypaint: ", utils.prefs().import_polypaint)
 
+                    # Polypaint is the one section whose element count is a
+                    # 4-byte int followed by a float, not an 8-byte int.
                     cnt, polypaint_payload = _read_goz_section(
-                        goz_file, self, "Polypaint"
+                        goz_file, self, "Polypaint", count_is_u32=True
                     )
 
                     if utils.prefs().import_polypaint:
