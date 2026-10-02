@@ -714,12 +714,21 @@ class GoB_OT_export(Operator):
                     bpy.ops.gob.search_zbrush('INVOKE_DEFAULT')
                 else:
                     zbrush_exec = utils.get_zbrush_exec()
-                    if paths.isMacOS:
-                        print("OSX Popen: ", zbrush_exec)
-                        Popen(['open', '-a', zbrush_exec, paths.PATH_SCRIPT])
+                    paths.deploy_zfileutils(zbrush_exec)
+                    launch_script = paths.get_launch_script()
+                    if not os.path.isfile(launch_script):
+                        ui.ShowReport(
+                            self,
+                            [launch_script],
+                            "GoB: missing GoB_Import zscript",
+                            'COLORSET_01_VEC',
+                        )
+                    elif paths.isMacOS:
+                        print("OSX Popen: ", zbrush_exec, launch_script)
+                        Popen(['open', '-a', zbrush_exec, launch_script])
                     else:
-                        print("Windows Popen: ", zbrush_exec)
-                        Popen([zbrush_exec, paths.PATH_SCRIPT], shell=True)
+                        print("Windows Popen: ", zbrush_exec, launch_script)
+                        Popen([zbrush_exec, launch_script])
 
         if context.object and currentContext:
             bpy.ops.object.mode_set(mode=currentContext)

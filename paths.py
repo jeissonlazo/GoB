@@ -17,8 +17,10 @@
 # ##### END GPL LICENSE BLOCK #####
 
 import bpy
+import glob
 import os
 import platform
+import shutil
 from subprocess import Popen
 from bpy.types import Operator
 from . import ui, utils, gob_import
@@ -54,7 +56,7 @@ def gob_init_os_paths():
     PATH_BLENDER = os.path.join(bpy.app.binary_path)    
     PATH_OBJLIST = os.path.join(PATH_GOZ, "GoZBrush", "GoZ_ObjectList.txt")
     PATH_CONFIG = os.path.join(PATH_GOZ, "GoZBrush", "GoZ_Config.txt") 
-    PATH_SCRIPT = os.path.join(PATH_GOB, "ZScripts", "GoB_Import.zsc")
+    PATH_SCRIPT = os.path.join(PATH_GOB, "ZScripts", "GoB_Import.txt")
     PATH_VARS = os.path.join(PATH_GOZ, "GoZProjects", "Default", "GoB_variables.zvr")  
 
     return isMacOS, PATH_GOB, PATH_BLENDER, PATH_GOZ, PATH_OBJLIST, PATH_CONFIG, PATH_SCRIPT, PATH_VARS
@@ -85,6 +87,87 @@ def set_goz_path_from_preferences(preferences=None):
         set_goz_path(utils.get_pixologic_path(preferences))
     else:
         set_goz_path(DEFAULT_PATH_GOZ)
+
+
+def find_zbrush_user_asset_roots():
+    """Return Maxon ZBrush 2026+ user-asset folders (Roaming/AppSupport)."""
+    roots = []
+    env_dir = os.environ.get("ZBRUSH_USER_ASSETS_DIR")
+    if env_dir and os.path.isdir(env_dir):
+        roots.append(os.path.abspath(env_dir))
+
+    if platform.system() == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            maxon_root = os.path.join(appdata, "Maxon")
+            roots.extend(glob.glob(os.path.join(maxon_root, "ZBrush_*")))
+            roots.extend(glob.glob(os.path.join(maxon_root, "Maxon ZBrush *")))
+    elif platform.system() == "Darwin":
+        home = os.path.expanduser("~")
+        for parent in (
+            os.path.join(home, "Library", "Application Support", "Maxon"),
+            os.path.join(home, "Library", "Preferences", "Maxon"),
+        ):
+            roots.extend(glob.glob(os.path.join(parent, "ZBrush_*")))
+            roots.extend(glob.glob(os.path.join(parent, "Maxon ZBrush *")))
+
+    unique_roots = []
+    seen = set()
+    for root in roots:
+        normalized = os.path.abspath(root)
+        if normalized not in seen and os.path.isdir(normalized):
+            seen.add(normalized)
+            unique_roots.append(normalized)
+    return unique_roots
+
+
+def find_zbrush_plugs64_dirs(zbrush_exec=None):
+    """Writable ZPlugs64 folders where ZBrush 2026.1+ resolves plugin data."""
+    dirs = []
+    for root in find_zbrush_user_asset_roots():
+        zstartup = os.path.join(root, "ZStartup")
+        plugs = os.path.join(zstartup, "ZPlugs64")
+        if os.path.isdir(plugs):
+            dirs.append(plugs)
+        elif os.path.isdir(zstartup):
+            try:
+                os.makedirs(plugs, exist_ok=True)
+                dirs.append(plugs)
+            except OSError as exc:
+                print("GoB: could not create", plugs, exc)
+    return dirs
+
+
+def deploy_zfileutils(zbrush_exec=None):
+    """Copy ZFileUtils next to ZBrush 2026 user plugins so the import script can load it."""
+    src = os.path.join(PATH_GOB, "ZScripts", "MyPluginData")
+    if not os.path.isdir(src):
+        print("GoB: MyPluginData folder is missing:", src)
+        return False
+
+    deployed = False
+    for plugs in find_zbrush_plugs64_dirs(zbrush_exec):
+        dest = os.path.join(plugs, "MyPluginData")
+        try:
+            os.makedirs(dest, exist_ok=True)
+            for name in os.listdir(src):
+                source_file = os.path.join(src, name)
+                if os.path.isfile(source_file):
+                    shutil.copy2(source_file, os.path.join(dest, name))
+            print("GoB: deployed ZFileUtils to", dest)
+            deployed = True
+        except OSError as exc:
+            print("GoB: could not deploy ZFileUtils to", dest, exc)
+    return deployed
+
+
+def get_launch_script():
+    """Prefer the editable zscript so ZBrush 2026.2+ picks up the import fixes."""
+    txt_script = os.path.join(PATH_GOB, "ZScripts", "GoB_Import.txt")
+    zsc_script = os.path.join(PATH_GOB, "ZScripts", "GoB_Import.zsc")
+    if os.path.isfile(txt_script):
+        return txt_script
+    return zsc_script
 
 
 def find_zbrush(self, context, isMacOS):
