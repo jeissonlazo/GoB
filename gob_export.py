@@ -261,14 +261,11 @@ class GoB_OT_export(Operator):
                         start_time = utils.profiler(start_time, "    Polypaint:  write numVertices")
 
                     for i in range(0, len(vcolArray), 3):
-                        goz_file.write(pack('<B', vcolArray[i+2]))
-                        goz_file.write(pack('<B', vcolArray[i+1]))
-                        goz_file.write(pack('<B', vcolArray[i]))
-                        goz_file.write(pack('<B', 0))
+                        goz_file.write(pack('<4B', vcolArray[i+2], vcolArray[i+1], vcolArray[i], 0))
                     if utils.prefs().performance_profiling: 
                         start_time = utils.profiler(start_time, "    Polypaint: write color")
 
-                    vcolArray.clear()
+                    del vcolArray
                     if utils.prefs().performance_profiling: 
                         start_time = utils.profiler(start_time, "    Polypaint:  vcolArray.clear")
 
@@ -285,16 +282,20 @@ class GoB_OT_export(Operator):
                 if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "    Polypaint:  write numVertices")
 
-                vcol_data = bytearray()
-                for i in range(0, len(vcolArray), 3):
-                    vcol_data.extend(pack('<4B', vcolArray[i+2], vcolArray[i+1], vcolArray[i], 0))
+                # get_vertex_colors() returns an (numVertices, 3) uint8 RGB array,
+                # GoZ expects one BGRA byte quad per vertex.
+                vcol_bgra = np.zeros((numVertices, 4), dtype=np.uint8)
+                copy_count = min(numVertices, len(vcolArray))
+                vcol_bgra[:copy_count, 0] = vcolArray[:copy_count, 2]
+                vcol_bgra[:copy_count, 1] = vcolArray[:copy_count, 1]
+                vcol_bgra[:copy_count, 2] = vcolArray[:copy_count, 0]
 
-                goz_file.write(vcol_data)
+                goz_file.write(vcol_bgra.tobytes())
 
                 if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "    Polypaint: write color")
 
-                vcolArray.clear()
+                del vcolArray, vcol_bgra
                 if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "    Polypaint:  vcolArray.clear")
 
