@@ -4,3 +4,4 @@ ZScripts/GoB_Import_Settings.zvr
 .zed
 build/
 .agents/
+.probe/

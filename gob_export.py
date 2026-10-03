@@ -721,6 +721,14 @@ class GoB_OT_export(Operator):
             object_path = paths.join_goz_path(PATH_PROJECT, obj_for_entry.name)
             with open(f"{object_path}.ztn", 'wt') as ztn:
                 ztn.write(object_path)
+            # Pixologic's own import script reads the single-object path from
+            # GoZBrush\GoZ_ObjectPath.txt. GoB only wrote its own .ztn marker, so
+            # the file the official hand-off expects was never there.
+            try:
+                with open(paths.goz_object_path_file(goz_root), 'wt') as object_path_file:
+                    object_path_file.write(object_path)
+            except OSError as error:
+                print(f"GoB: could not write GoZ_ObjectPath.txt: {error}")
             GoZ_ObjectList.write(f'{object_path}\n')
 
         with open(paths.PATH_OBJLIST, 'wt') as GoZ_ObjectList:
@@ -793,7 +801,19 @@ class GoB_OT_export(Operator):
                     zbrush_exec = utils.get_zbrush_exec()
                     paths.deploy_zfileutils(zbrush_exec)
                     launch_script = paths.get_launch_script()
-                    if not os.path.isfile(launch_script):
+                    # ZBrush's own GoZ applications hand their exports over with
+                    # GoZBrush\GoZBrushFromApp.exe: it makes the ZBrush that is
+                    # already open import the files, and starts one only when
+                    # there is none. Launching ZBrush.exe with the import script
+                    # instead -- what this used to do -- makes a *second*
+                    # instance import the model while the session the user is
+                    # working in keeps the old mesh.
+                    helper = paths.find_goz_from_app_helper(goz_root)
+                    if helper is not None and paths.zbrush_is_running():
+                        print("GoB: handing the export to the running ZBrush:",
+                              helper)
+                        Popen([helper], cwd=goz_root)
+                    elif not os.path.isfile(launch_script):
                         ui.ShowReport(
                             self,
                             [launch_script],

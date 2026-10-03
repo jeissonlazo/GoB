@@ -1,4 +1,4 @@
-﻿/*
+/*
 name: GoB_Import.zsc 
 description: Zbrush script for Blender GoB addon
 tracker_url: https://github.com/JoseConseco/GoB
@@ -295,8 +295,13 @@ author: Daniel Grauer
 
         [Loop,totalSubtools,            //loop over subtools
             [SubToolSelect,[Val,activeSubtool]]
+            // Keep the raw title. ZBrush shows a subtool as "Name." in 2026 and
+            // as "Name ." in older builds, while this used to drop a fixed two
+            // characters: "GoBTopoProbe." became "GoBTopoProb", so FindSubtool
+            // never matched and GoB added a second subtool instead of updating
+            // the one the user was working on. FindSubtool now accepts both
+            // decorated forms.
             [VarSet,subtoolName,[IGetTitle,"Tool:ItemInfo"]]        //get the subtool name
-            [VarSet,subtoolName,[StrExtract,subtoolName,0,[StrLength,subtoolName]-2]]       // trim chars from the end.
             //[Note,[StrMerge,"\nactiveSubtool: ",activeSubtool, "\nSubtool Name: ",subtoolName, " ",[StrLength,subtoolName], "\nTarget Object: ",  objectName, " ",[StrLength,objectName]],,0]
             
             [VarSet,SubtoolList(activeSubtool),subtoolName]         //add subtools to list
@@ -351,15 +356,36 @@ author: Daniel Grauer
     // search for subtools with object name in subtoolList 
     // and return a list with the names of subtools
         [VarSet,count,0]
+        // ZBrush decorates a subtool title: "Name." in 2026, "Name ." in older
+        // builds. Build the three accepted spellings once, instead of trimming
+        // characters off the title, which is what made every match fail.
+        [VarSet,nameExact,objectName]
+        [VarSet,nameDotted,[StrMerge,objectName,"."]]
+        [VarSet,nameSpaced,[StrMerge,objectName," ."]]
+        [VarSet,lenExact,[StrLength,objectName]]
+        [VarSet,lenDotted,lenExact+1]
+        [VarSet,lenSpaced,lenExact+2]
         [Loop,[VarSize,SubtoolList],   // search for subtools with object name in subtoolList 
             //[Note,[StrMerge,"\nStrLength: \n index:", count, " >length: ",[StrLength,SubtoolList(count)], " > Name: ", SubtoolList(count)],,reportDuration] 
             
-            [If, ([StrFind,SubtoolList(count),objectName]==0) && ([StrLength,SubtoolList(count)]==[StrLength,objectName]),
+            [If, ([StrFind,SubtoolList(count),nameExact]==0) && ([StrLength,SubtoolList(count)]==lenExact),
                 [VarSet, subtoolExists, objectName] //subtoolExists (str:objectName/ -1: for no subtool match
                 [VarSet,subtoolCount, count] 
                 [LoopExit]
             , //else
-                [VarSet, subtoolExists, -1] //subtoolExists (str:objectName/ -1: for no subtool match
+                [If, ([StrFind,SubtoolList(count),nameDotted]==0) && ([StrLength,SubtoolList(count)]==lenDotted),
+                    [VarSet, subtoolExists, objectName]
+                    [VarSet,subtoolCount, count] 
+                    [LoopExit]
+                , //else
+                    [If, ([StrFind,SubtoolList(count),nameSpaced]==0) && ([StrLength,SubtoolList(count)]==lenSpaced),
+                        [VarSet, subtoolExists, objectName]
+                        [VarSet,subtoolCount, count] 
+                        [LoopExit]
+                    , //else
+                        [VarSet, subtoolExists, -1] //subtoolExists (str:objectName/ -1: for no subtool match
+                    ]
+                ]
             ] 
             [VarInc, count]           
             [If,count >= [VarSize, SubtoolList],
@@ -410,8 +436,7 @@ author: Daniel Grauer
 
     [RoutineDef, AddSubTool,        
         [VarDef, subtoolCount, 0]
-        [VarSet,subtoolName,[IGetTitle, "Tool:ItemInfo"]]        //get the subtool name
-        [VarSet,subtoolName,[StrExtract, subtoolName, 0,[StrLength, subtoolName]-2]]       // trim chars from the end.
+        [VarSet,subtoolName,[IGetTitle, "Tool:ItemInfo"]]        //get the subtool name, decoration included
         [If, [ToolGetSubToolID] == 0,
             [If,[FileExists, objectPath],
                 [FileNameSetNext, objectPath] 

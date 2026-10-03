@@ -21,6 +21,7 @@ import glob
 import os
 import platform
 import shutil
+import subprocess
 from subprocess import Popen
 from bpy.types import Operator
 from . import ui, utils, gob_import
@@ -199,6 +200,59 @@ def get_launch_script():
     if os.path.isfile(txt_script):
         return txt_script
     return zsc_script
+
+
+def find_goz_from_app_helper(goz_root=None):
+    """Return Pixologic's "model from an application" helper, if installed.
+
+    Every GoZ-enabled application ships its exports by writing the handshake
+    files and then running this program, which makes the ZBrush that is
+    *already open* import them and starts one only when there is none. It reads
+    GoZBrush/GoZ_Application.txt to know which application is exporting.
+    """
+    root = goz_root or PATH_GOZ
+    if not root:
+        return None
+    for candidate in (
+        os.path.join(root, "GoZBrush", "GoZBrushFromApp.exe"),
+        os.path.join(root, "GoZBrush", "GoZBrushFromApp.app"),
+        os.path.join(root, "GoZBrush", "GoZBrushFromApp"),
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def zbrush_is_running():
+    """True when a ZBrush process is already up, so it can be handed the file.
+
+    Detection failure is reported as False on purpose: the caller then falls
+    back to launching ZBrush with the import script, which is the behaviour
+    that works from a cold start.
+    """
+    try:
+        if platform.system() == "Windows":
+            completed = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq ZBrush.exe", "/NH"],
+                capture_output=True, text=True, timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return "zbrush.exe" in (completed.stdout or "").lower()
+        return (
+            subprocess.run(
+                ["pgrep", "-x", "ZBrush"], capture_output=True, timeout=20
+            ).returncode
+            == 0
+        )
+    except Exception as error:  # pragma: no cover - environment dependent
+        print(f"GoB: could not check for a running ZBrush: {error}")
+        return False
+
+
+def goz_object_path_file(goz_root=None):
+    """The path ZBrush's own import script reads for a single object."""
+    root = goz_root or PATH_GOZ
+    return os.path.join(root, "GoZBrush", "GoZ_ObjectPath.txt")
 
 
 def find_zbrush(self, context, isMacOS):
