@@ -28,21 +28,6 @@ from bpy.props import BoolProperty
 from . import paths, utils, geometry, ui, gob_import
 
 
-_EXPORT_VERTEX_CHUNK = 1_000_000
-_EXPORT_FACE_CHUNK = 500_000
-
-
-def _mesh_topology_arrays(mesh):
-    face_count = len(mesh.polygons)
-    loop_starts = np.empty(face_count, dtype=np.int32)
-    loop_totals = np.empty(face_count, dtype=np.int32)
-    loop_vertices = np.empty(len(mesh.loops), dtype=np.int32)
-    mesh.polygons.foreach_get('loop_start', loop_starts)
-    mesh.polygons.foreach_get('loop_total', loop_totals)
-    mesh.loops.foreach_get('vertex_index', loop_vertices)
-    return loop_starts, loop_totals, loop_vertices
-
-
 class GoB_OT_export(Operator):
     bl_idname = "scene.gob_export"
     bl_label = "Export to ZBrush"
@@ -53,235 +38,226 @@ class GoB_OT_export(Operator):
         description="Export as a tool instead of a subtool",
         default=False,
     )
-
+    
     @classmethod
-    def poll(cls, context):
-        return geometry.export_poll(cls, context)
+    def poll(cls, context):              
+        return geometry.export_poll(cls, context)    
 
-    def exportGoZ(self, scn, obj, path_export):
-        PATH_PROJECT = utils.get_project_path()
-        if utils.prefs().performance_profiling:
+    def exportGoZ(self, scn, obj, path_export):      
+        PATH_PROJECT = utils.prefs().project_path
+        if utils.prefs().performance_profiling: 
             print("\n", 100*"=")
             start_time = utils.profiler(time.perf_counter(), "Export Profiling: " + obj.name)
             start_total_time = utils.profiler(time.perf_counter(), 80*"=")
 
         mesh_tmp = geometry.apply_modifiers(obj)
-        if utils.prefs().performance_profiling:
+        if utils.prefs().performance_profiling: 
             start_time = utils.profiler(start_time, "Make Mesh apply_modifiers")
 
+        mesh_tmp.calc_loop_triangles()
+        if utils.prefs().performance_profiling: 
+            start_time = utils.profiler(start_time, "Make Mesh calc_loop_triangles")
+
         mesh_tmp, mat_transform = geometry.apply_transformation(mesh_tmp, is_import=False)
-        if utils.prefs().performance_profiling:
+        if utils.prefs().performance_profiling: 
             start_time = utils.profiler(start_time, "Make Mesh apply_transformation")
 
-        if utils.prefs().performance_profiling:
+        if utils.prefs().performance_profiling: 
             start_time = utils.profiler(start_time, "Make Mesh export")
 
         fileExt = '.bmp'
 
-        # write GoB ZScript variables
-        with open(paths.PATH_VARS , 'wb') as GoBVars:
+        # write GoB ZScript variables   
+        with open(paths.PATH_VARS , 'wb') as GoBVars:            
             GoBVars.write(pack('<4B', 0xE9, 0x03, 0x00, 0x00))
-            # list size
+            #list size
             GoBVars.write(pack('<1B', 0x07))   #NOTE: n list items, update this when adding new items to list
-            GoBVars.write(pack('<2B', 0x00, 0x00))
-            if utils.prefs().performance_profiling:
+            GoBVars.write(pack('<2B', 0x00, 0x00)) 
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "    variablesFile: Write list size")
 
             # 0: fileExtension
             GoBVars.write(pack('<2B',0x00, 0x53))   #.S
             GoBVars.write(b'.GoZ')
-            if utils.prefs().performance_profiling:
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "    variablesFile: Write fileExtension")
 
-            # 1: textureFormat
+            # 1: textureFormat   
             GoBVars.write(pack('<2B',0x00, 0x53))   #.S
-            GoBVars.write(b'.bmp')
-            if utils.prefs().performance_profiling:
+            GoBVars.write(b'.bmp') 
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "    variablesFile: Write textureFormat")
 
             # 2: diffTexture suffix
-            GoBVars.write(pack('<2B',0x00, 0x53))   #.S
+            GoBVars.write(pack('<2B',0x00, 0x53))   #.S            
             name = utils.prefs().import_diffuse_suffix
-            GoBVars.write(name.encode('utf-8'))
-            if utils.prefs().performance_profiling:
-                start_time = utils.profiler(start_time, "    variablesFile: Write diffTexture suffix")
+            GoBVars.write(name.encode('utf-8'))  
+            if utils.prefs().performance_profiling: 
+                start_time = utils.profiler(start_time, "    variablesFile: Write diffTexture suffix") 
 
             # 3: normTexture suffix
             GoBVars.write(pack('<2B',0x00, 0x53))   #.S
             name = utils.prefs().import_normal_suffix
-            GoBVars.write(name.encode('utf-8'))
-            if utils.prefs().performance_profiling:
-                start_time = utils.profiler(start_time, "    variablesFile: Write normTexture suffix")
+            GoBVars.write(name.encode('utf-8')) 
+            if utils.prefs().performance_profiling: 
+                start_time = utils.profiler(start_time, "    variablesFile: Write normTexture suffix") 
 
             # 4: dispTexture suffix
             GoBVars.write(pack('<2B',0x00, 0x53))   #.S
             name = utils.prefs().import_displace_suffix
-            GoBVars.write(name.encode('utf-8'))
-            if utils.prefs().performance_profiling:
+            GoBVars.write(name.encode('utf-8')) 
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "    variablesFile: Write dispTexture suffix")
 
-            # 5: GoB version
-            GoBVars.write(pack('<2B',0x00, 0x53))   #.S
+            #5: GoB version  
+            GoBVars.write(pack('<2B',0x00, 0x53))   #.S 
             GoBVars.write(utils.gob_version().encode('utf-8'))
-            if utils.prefs().performance_profiling:
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "    variablesFile: Write GoB version")
 
             # 6: Project Path
             GoBVars.write(pack('<2B',0x00, 0x53))   #.S
-            name = utils.get_project_path()
-            GoBVars.write(name.encode('utf-8'))
-            if utils.prefs().performance_profiling:
+            name = utils.prefs().project_path
+            GoBVars.write(name.encode('utf-8')) 
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "    variablesFile: Write Project Path")
-            # end
-            GoBVars.write(pack('<B', 0x00))  #.
-        if utils.prefs().performance_profiling:
+            #end  
+            GoBVars.write(pack('<B', 0x00))  #. 
+        if utils.prefs().performance_profiling: 
             start_time = utils.profiler(start_time, "variablesFile: Write GoB_variables")
 
-        try:
-            object_name_bytes = obj.name.encode('ascii')
-        except UnicodeEncodeError:
-            self.escape_object_name(obj)
-            object_name_bytes = obj.name.encode('ascii')
 
-        with open(os.path.join(path_export + '/{0}.GoZ'.format(obj.name)), 'wb') as goz_file:
+        with open(os.path.join(path_export + '/{0}.GoZ'.format(obj.name)), 'wb') as goz_file:    
             numFaces = len(mesh_tmp.polygons)
             numVertices = len(mesh_tmp.vertices)
-            loop_starts, loop_totals, loop_vertices = _mesh_topology_arrays(
-                mesh_tmp
-            )
 
             # --File Header--
             goz_file.write(b"GoZb 1.0 ZBrush GoZ Binary")
             goz_file.write(pack('<6B', 0x2E, 0x2E, 0x2E, 0x2E, 0x2E, 0x2E))
             goz_file.write(pack('<I', 1))  # obj tag
-            goz_file.write(pack('<I', len(object_name_bytes)+24))
+            goz_file.write(pack('<I', len(obj.name)+24))
             goz_file.write(pack('<Q', 1))
-            if utils.prefs().performance_profiling:
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "Write File Header")
 
             # --Object Name--
-            goz_file.write(b'GoZMesh_' + object_name_bytes)
+            goz_file.write(b'GoZMesh_' + obj.name.encode('utf-8'))
             goz_file.write(pack('<4B', 0x89, 0x13, 0x00, 0x00))
             goz_file.write(pack('<I', 20))
             goz_file.write(pack('<Q', 1))
             goz_file.write(pack('<I', 0))
-            if utils.prefs().performance_profiling:
-                start_time = utils.profiler(start_time, "Write Object Name")
+            if utils.prefs().performance_profiling: 
+                start_time = utils.profiler(start_time, "Write Object Name")            
 
             # --Vertices--
             goz_file.write(pack('<4B', 0x11, 0x27, 0x00, 0x00))
             goz_file.write(pack('<I', numVertices*3*4+16))
             goz_file.write(pack('<Q', numVertices))
+            
+            vertex_coords = np.zeros(numVertices * 3, dtype=np.float32)
+            mesh_tmp.vertices.foreach_get('co', vertex_coords)
+            vertex_coords = vertex_coords.reshape(-1, 3)
 
-            vertex_coords = np.empty((numVertices, 3), dtype=np.float32)
-            mesh_tmp.vertices.foreach_get('co', vertex_coords.reshape(-1))
-            matrix_world_np = np.asarray(obj.matrix_world, dtype=np.float32)
-            mat_transform_np = np.asarray(mat_transform, dtype=np.float32)
-            combined_transform = mat_transform_np @ matrix_world_np
-            rotation_scale = combined_transform[:3, :3].T
-            translation = combined_transform[:3, 3]
+            matrix_world_np = np.array(obj.matrix_world, dtype=np.float32)
+            mat_transform_np = np.array(mat_transform, dtype=np.float32)
+            
+            homogeneous_coords = np.column_stack([vertex_coords, np.ones(numVertices)])
+            
+            # matrix_world
+            transformed_coords = (matrix_world_np @ homogeneous_coords.T).T[:, :3]
+            
+            # mat_transform
+            homogeneous_transformed = np.column_stack([transformed_coords, np.ones(numVertices)])
+            final_coords = (mat_transform_np @ homogeneous_transformed.T).T[:, :3]
 
-            for chunk_start in range(0, numVertices, _EXPORT_VERTEX_CHUNK):
-                chunk_end = min(
-                    chunk_start + _EXPORT_VERTEX_CHUNK, numVertices
-                )
-                final_coords = vertex_coords[chunk_start:chunk_end] @ rotation_scale
-                final_coords += translation
-                goz_file.write(
-                    final_coords.astype('<f4', copy=False).tobytes()
-                )
-            del vertex_coords
+            goz_file.write(pack(f'<{numVertices * 3}f', *final_coords.flatten()))
 
-            if utils.prefs().performance_profiling:
-                start_time = utils.profiler(start_time, "Write Vertices")
+            if utils.prefs().performance_profiling: 
+                start_time = utils.profiler(start_time, "Write Vertices")            
 
             # --Faces--
             goz_file.write(pack('<4B', 0x21, 0x4E, 0x00, 0x00))
             goz_file.write(pack('<I', numFaces*4*4+16))
             goz_file.write(pack('<Q', numFaces))
-
-            for chunk_start in range(0, numFaces, _EXPORT_FACE_CHUNK):
-                chunk_end = min(chunk_start + _EXPORT_FACE_CHUNK, numFaces)
-                starts = loop_starts[chunk_start:chunk_end]
-                totals = loop_totals[chunk_start:chunk_end]
-                face_data = np.full(
-                    (chunk_end - chunk_start, 4),
-                    np.uint32(0xFFFFFFFF),
-                    dtype=np.uint32,
-                )
-                for corner in range(4):
-                    valid = totals > corner
-                    face_data[valid, corner] = loop_vertices[
-                        starts[valid] + corner
-                    ]
-                goz_file.write(face_data.astype('<u4', copy=False).tobytes())
-
-            if utils.prefs().performance_profiling:
+            
+            face_data = bytearray()
+            
+            for face in mesh_tmp.polygons:
+                if len(face.vertices) == 4:
+                    face_data.extend(pack('<4I', face.vertices[0],
+                                face.vertices[1],
+                                face.vertices[2],
+                                face.vertices[3]))
+                elif len(face.vertices) == 3:
+                    face_data.extend(pack('<3I4B', face.vertices[0],
+                                face.vertices[1],
+                                face.vertices[2],
+                                0xFF, 0xFF, 0xFF, 0xFF))
+            
+            goz_file.write(face_data)
+            
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "Write Faces")
 
             # --UVs--
             if mesh_tmp.uv_layers.active:
-                uv_layer = mesh_tmp.uv_layers.active
+                uv_layer = mesh_tmp.uv_layers[0]
                 goz_file.write(pack('<4B', 0xA9, 0x61, 0x00, 0x00))
                 goz_file.write(pack('<I', len(mesh_tmp.polygons)*4*2*4+16))
                 goz_file.write(pack('<Q', len(mesh_tmp.polygons)))
 
-                if utils.prefs().performance_profiling:
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "    UV: polygones")
 
-                uv_coords = np.empty(
-                    (len(uv_layer.data), 2), dtype=np.float32
-                )
-                uv_layer.data.foreach_get('uv', uv_coords.reshape(-1))
+                total_uvs = len(mesh_tmp.polygons) * 4
+                uv_coords = np.zeros(total_uvs * 2, dtype=np.float32)
+                uv_layer.data.foreach_get('uv', uv_coords)
+                uv_coords = uv_coords.reshape(-1, 2)
                 if utils.prefs().export_uv_flip_x:
                     uv_coords[:, 0] = 1.0 - uv_coords[:, 0]
                 if utils.prefs().export_uv_flip_y:
                     uv_coords[:, 1] = 1.0 - uv_coords[:, 1]
 
-                for chunk_start in range(0, numFaces, _EXPORT_FACE_CHUNK):
-                    chunk_end = min(chunk_start + _EXPORT_FACE_CHUNK, numFaces)
-                    starts = loop_starts[chunk_start:chunk_end]
-                    totals = loop_totals[chunk_start:chunk_end]
-                    uv_data = np.empty(
-                        (chunk_end - chunk_start, 4, 2), dtype=np.float32
-                    )
-                    uv_data[:, :, 0] = 0.0
-                    uv_data[:, :, 1] = 1.0
-                    for corner in range(4):
-                        valid = totals > corner
-                        uv_data[valid, corner] = uv_coords[
-                            starts[valid] + corner
-                        ]
-                    goz_file.write(
-                        uv_data.astype('<f4', copy=False).tobytes()
-                    )
+                uv_data = []
+                coord_index = 0
+                for face in mesh_tmp.polygons:
+                    for loop_index in face.loop_indices:
+                        x, y = uv_coords[coord_index]
+                        uv_data.extend([x, y])
+                        coord_index += 1
 
-                if utils.prefs().performance_profiling:
+                    if len(face.loop_indices) == 3:
+                        uv_data.extend([0.0, 1.0])
+
+                goz_file.write(pack(f'<{len(uv_data)}f', *uv_data))
+
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "    UV: write uvs")
 
-            if utils.prefs().performance_profiling:
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "Write UV")
 
+
             # --Polypaint--
-            if bpy.app.version < (3,4,0):
+            if bpy.app.version < (3,4,0): 
                 if mesh_tmp.vertex_colors.active:
                     vcoldata = mesh_tmp.vertex_colors.active.data # color[loop_id]
                     vcolArray = bytearray([0] * numVertices * 3)
-                    # fill vcArray(vert_idx + rgb_offset) = color_xyz
+                    #fill vcArray(vert_idx + rgb_offset) = color_xyz
                     for loop in mesh_tmp.loops: #in the end we will fill verts with last vert_loop color
                         vert_idx = loop.vertex_index
                         vcolArray[vert_idx*3] = int(255*vcoldata[loop.index].color[0])
                         vcolArray[vert_idx*3+1] = int(255*vcoldata[loop.index].color[1])
                         vcolArray[vert_idx*3+2] = int(255*vcoldata[loop.index].color[2])
 
-                    if utils.prefs().performance_profiling:
+                    if utils.prefs().performance_profiling: 
                         start_time = utils.profiler(start_time, "    Polypaint:  loop")
 
                     goz_file.write(pack('<4B', 0xb9, 0x88, 0x00, 0x00))
                     goz_file.write(pack('<I', numVertices*4+16))
                     goz_file.write(pack('<I', numVertices))
                     goz_file.write(pack("<f", 0))
-                    if utils.prefs().performance_profiling:
+                    if utils.prefs().performance_profiling: 
                         start_time = utils.profiler(start_time, "    Polypaint:  write numVertices")
 
                     for i in range(0, len(vcolArray), 3):
@@ -289,69 +265,56 @@ class GoB_OT_export(Operator):
                         goz_file.write(pack('<B', vcolArray[i+1]))
                         goz_file.write(pack('<B', vcolArray[i]))
                         goz_file.write(pack('<B', 0))
-                    if utils.prefs().performance_profiling:
+                    if utils.prefs().performance_profiling: 
                         start_time = utils.profiler(start_time, "    Polypaint: write color")
 
                     vcolArray.clear()
-                    if utils.prefs().performance_profiling:
+                    if utils.prefs().performance_profiling: 
                         start_time = utils.profiler(start_time, "    Polypaint:  vcolArray.clear")
 
-            elif obj.data.color_attributes.active_color_name and obj.data.color_attributes.active_color_index >= 0:
+            elif obj.data.color_attributes.active_color_name and obj.data.color_attributes.active_color_index >= 0: 
 
-                vcolArray = geometry.get_vertex_colors(mesh_tmp, obj, numVertices)
-                if utils.prefs().performance_profiling:
+                vcolArray = geometry.get_vertex_colors(mesh_tmp, obj, numVertices) 
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "    Polypaint:  vcolArray")
 
                 goz_file.write(pack('<4B', 0xb9, 0x88, 0x00, 0x00))
                 goz_file.write(pack('<I', numVertices*4+16))
                 goz_file.write(pack('<I', numVertices))
                 goz_file.write(pack("<f", 0))
-                if utils.prefs().performance_profiling:
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "    Polypaint:  write numVertices")
 
-                for chunk_start in range(0, numVertices, _EXPORT_VERTEX_CHUNK):
-                    chunk_end = min(
-                        chunk_start + _EXPORT_VERTEX_CHUNK, numVertices
-                    )
-                    colors = vcolArray[chunk_start:chunk_end]
-                    vcol_data = np.zeros(
-                        (chunk_end - chunk_start, 4), dtype=np.uint8
-                    )
-                    vcol_data[:, 0] = colors[:, 2]
-                    vcol_data[:, 1] = colors[:, 1]
-                    vcol_data[:, 2] = colors[:, 0]
-                    goz_file.write(vcol_data.tobytes())
+                vcol_data = bytearray()
+                for i in range(0, len(vcolArray), 3):
+                    vcol_data.extend(pack('<4B', vcolArray[i+2], vcolArray[i+1], vcolArray[i], 0))
 
-                if utils.prefs().performance_profiling:
+                goz_file.write(vcol_data)
+
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "    Polypaint: write color")
 
-                del vcolArray
-                if utils.prefs().performance_profiling:
+                vcolArray.clear()
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "    Polypaint:  vcolArray.clear")
 
-                if utils.prefs().performance_profiling:
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "Write Polypaint")
 
             # --Mask--
-            if utils.prefs().export_mask !='NONE':
+            if not utils.prefs().export_clear_mask:
                 # since blender 4.1, Sculpt mask values are stored in a generic attribute
                 # https://developer.blender.org/docs/release_notes/4.1/python_api/#mesh
-                if '.sculpt_mask' in mesh_tmp.attributes and utils.prefs().export_mask == 'SCULPT_MASK' and bpy.app.version >= (4, 1, 0):
+                if '.sculpt_mask' in obj.data.attributes and bpy.app.version >= (4, 1, 0):
                     goz_file.write(pack('<4B', 0x32, 0x75, 0x00, 0x00))
                     goz_file.write(pack('<I', numVertices*2+16))
                     goz_file.write(pack('<Q', numVertices))
 
                     mask_data = np.zeros(numVertices, dtype=np.float32)
-                    mask_attr = mesh_tmp.attributes.get(".sculpt_mask")
+                    obj.data.attributes['.sculpt_mask'].data.foreach_get('value', mask_data)
+                    mask_values = ((1.0 - mask_data) * 65535).astype(np.uint16)
 
-                    if mask_attr and len(mask_attr.data) == len(mask_data):
-                        mask_attr.data.foreach_get('value', mask_data)
-                    else:
-                        mask_data[:] = [0.0] * len(mask_data)
-
-                    np.maximum(mask_data, 0.0, out=mask_data)
-                    mask_values = ((1.0 - mask_data) * 65535).astype('<u2')
-                    goz_file.write(mask_values.tobytes())
+                    goz_file.write(pack(f'<{numVertices}H', *mask_values))
 
                 else:
                     for vertexGroup in obj.vertex_groups:
@@ -359,121 +322,113 @@ class GoB_OT_export(Operator):
                             goz_file.write(pack('<4B', 0x32, 0x75, 0x00, 0x00))
                             goz_file.write(pack('<I', numVertices*2+16))
                             goz_file.write(pack('<Q', numVertices))
-                            mask_values = np.full(
-                                numVertices, 65535, dtype=np.uint16
-                            )
                             for i in range(numVertices):
                                 try:
-                                    mask_values[i] = int(
-                                        (1.0 - vertexGroup.weight(i)) * 65535
-                                    )
-                                except RuntimeError:
-                                    pass
-                            goz_file.write(
-                                mask_values.astype('<u2', copy=False).tobytes()
-                            )
+                                    goz_file.write(pack('<H', int((1.0 - vertexGroup.weight(i)) * 65535)))
+                                except Exception as e:
+                                    #print("no vertex group: ", e)
+                                    goz_file.write(pack('<H', 65535))
 
-            if utils.prefs().performance_profiling:
+            if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "Write Mask")
 
-            # --Polygroups--
-            if utils.prefs().export_polygroups != 'NONE':
+        
+           
+            # --Polygroups--     
+            if utils.prefs().export_polygroups != 'NONE':  
                 if utils.prefs().debug_output:
                     print("Export Polygroups: ", utils.prefs().export_polygroups)
 
-                # Polygroups from Face Sets
+                #Polygroups from Face Sets
                 if utils.prefs().export_polygroups == 'FACE_SETS':
 
                     goz_file.write(pack('<4B', 0x41, 0x9C, 0x00, 0x00))
                     goz_file.write(pack('<I', numFaces*2+16))
-                    goz_file.write(pack('<Q', numFaces))
-
-                    face_attr = geometry.get_sculpt_face_set_attribute(mesh_tmp)
+                    goz_file.write(pack('<Q', numFaces))  
+                      
                     if utils.prefs().debug_output:
-                        print("Exporting Face Sets: ", face_attr)
+                        print("Exporting Face Sets: ", '.sculpt_face_set' in obj.data.attributes)
 
-                    if face_attr is not None and len(face_attr.data) == numFaces:
+                    if '.sculpt_face_set' in obj.data.attributes:
                         face_set_data = np.zeros(numFaces, dtype=np.int32)
-                        face_attr.data.foreach_get("value", face_set_data)
-
-                        face_set_data[face_set_data < 0] = 65504
-                        face_set_data = face_set_data.astype('<u2')
-                        goz_file.write(face_set_data.tobytes())
-
+                        obj.data.attributes['.sculpt_face_set'].data.foreach_get('value', face_set_data)
+                        
+                        face_set_data = np.where(face_set_data < 0, 65504, face_set_data)
+                        face_set_data = face_set_data.astype(np.uint16)
+                        goz_file.write(pack(f'<{numFaces}H', *face_set_data))
+                        
                         if utils.prefs().debug_output:
                             print(f"Face sets exported: {numFaces} faces")
                             unique_values = np.unique(face_set_data)
                             print(f"Unique face set values: {unique_values}")
 
-                    else:   #assign empty when no face sets are found
-                        default_face_set_data = np.full(
-                            numFaces, 65504, dtype='<u2'
-                        )
-                        goz_file.write(default_face_set_data.tobytes())
-
+                    else:   #assign empty when no face sets are found        
+                        default_face_set_data = np.full(numFaces, 65504, dtype=np.uint16)
+                        goz_file.write(pack(f'<{numFaces}H', *default_face_set_data))
+                        
                         if utils.prefs().debug_output:
                             print(f"Default face sets written: {numFaces} faces")
 
-                    if utils.prefs().performance_profiling:
-                        start_time = utils.profiler(start_time, "Write Polygroup FaceSets")
+                    if utils.prefs().performance_profiling: 
+                        start_time = utils.profiler(start_time, "Write Polygroup FaceSets") 
 
                 # Polygroups from Vertex Groups
                 if utils.prefs().export_polygroups == 'VERTEX_GROUPS':
                     goz_file.write(pack('<4B', 0x41, 0x9C, 0x00, 0x00))
                     goz_file.write(pack('<I', numFaces*2+16))
-                    goz_file.write(pack('<Q', numFaces))
+                    goz_file.write(pack('<Q', numFaces)) 
 
-                    groupColor=[]
-                    # create a color for each facemap (0xffff)
+                    groupColor=[]                        
+                    #create a color for each facemap (0xffff)
                     for vg in obj.vertex_groups:
                         color = utils.random_color()
                         groupColor.append(color)
-                    # add a color for elements that are not part of a vertex group
+                    #add a color for elements that are not part of a vertex group
                     groupColor.append(0)
 
-                    polygroup_values = np.full(
-                        numFaces, 65504, dtype=np.uint16
-                    )
-                    if len(obj.vertex_groups) > 0:
+
+                    ''' 
+                    # create a list of each vertex group assignement so one vertex can be in x amount of groups 
+                    # then check for each face to which groups their vertices are MOST assigned to 
+                    # and choose that group for the polygroup color if its on all vertices of the face
+                    '''
+                    if len(obj.vertex_groups) > 0:  
+                        vgData = []  
                         for face in mesh_tmp.polygons:
-                            face_groups = []
+                            vgData.append([])
                             for vert in face.vertices:
                                 for vg in mesh_tmp.vertices[vert].groups:
-                                    if (
-                                        vg.weight
-                                        >= utils.prefs().export_weight_threshold
-                                        and vg.group < len(obj.vertex_groups)
-                                        and obj.vertex_groups[
-                                            vg.group
-                                        ].name.lower()
-                                        != 'mask'
-                                    ):
-                                        face_groups.append(vg.group)
+                                    if vg.weight >= utils.prefs().export_weight_threshold and obj.vertex_groups[vg.group].name.lower() != 'mask':         
+                                        vgData[face.index].append(vg.group)
 
-                            if face_groups:
-                                group = max(
-                                    face_groups, key=face_groups.count
-                                )
-                                if face_groups.count(group) == len(face.vertices):
-                                    polygroup_values[face.index] = groupColor[group]
+                            if vgData[face.index]:                            
+                                group =  max(vgData[face.index], key = vgData[face.index].count)
+                                count = vgData[face.index].count(group)
+                                #print(vgData[face.index])
+                                #print("face:", face.index, "verts:", len(face.vertices), "elements:", count, 
+                                #"\ngroup:", group, "color:", groupColor[group] )                            
+                                if len(face.vertices) == count:
+                                    #print(face.index, group, groupColor[group], count)
+                                    goz_file.write(pack('<H', groupColor[group]))
+                                else:
+                                    goz_file.write(pack('<H', 65504))
+                            else:
+                                goz_file.write(pack('<H', 65504))
 
-                    goz_file.write(
-                        polygroup_values.astype('<u2', copy=False).tobytes()
-                    )
+                        if utils.prefs().performance_profiling: 
+                            start_time = utils.profiler(start_time, "Write Polygroup Vertex groups")
 
-                    if utils.prefs().performance_profiling:
-                        start_time = utils.profiler(
-                            start_time, "Write Polygroup Vertex groups"
-                        )
 
                 # Polygroups from materials
-                if utils.prefs().export_polygroups == 'MATERIALS':
-                    if len(obj.material_slots) > 0:
+                if utils.prefs().export_polygroups == 'MATERIALS':   
+                    #print("material slots: ", len(obj.material_slots))
+                    if len(obj.material_slots) > 0:               
                         goz_file.write(pack('<4B', 0x41, 0x9C, 0x00, 0x00))
                         goz_file.write(pack('<I', numFaces*2+16))
-                        goz_file.write(pack('<Q', numFaces))
+                        goz_file.write(pack('<Q', numFaces))  
 
                         groupColor=[]
+                        #create a color for each material slot (0xffff)
                         for mat in obj.material_slots:
                             if mat:
                                 color = utils.random_color()
@@ -481,28 +436,13 @@ class GoB_OT_export(Operator):
                             else:
                                 groupColor.append(65504)
 
-                        material_indices = np.empty(
-                            numFaces, dtype=np.int32
-                        )
-                        mesh_tmp.polygons.foreach_get(
-                            'material_index', material_indices
-                        )
-                        colors = np.asarray(groupColor, dtype=np.uint16)
-                        valid = material_indices < len(colors)
-                        polygroup_values = np.full(
-                            numFaces, 65504, dtype=np.uint16
-                        )
-                        polygroup_values[valid] = colors[
-                            material_indices[valid]
-                        ]
-                        goz_file.write(
-                            polygroup_values.astype(
-                                '<u2', copy=False
-                            ).tobytes()
-                        )
+                        for f in mesh_tmp.polygons:  # iterate over faces
+                            #print(f.index, f.material_index, groupColor[f.material_index], numFaces, len(mesh_tmp.polygons))
+                            goz_file.write(pack('<H', groupColor[f.material_index]))                        
 
-                    if utils.prefs().performance_profiling:
-                        start_time = utils.profiler(start_time, "Write Polygroup materials")
+                    if utils.prefs().performance_profiling: 
+                        start_time = utils.profiler(start_time, "Write Polygroup materials") 
+
 
             # Diff, disp_texture and norm_texture maps
             diff_texture = None
@@ -513,9 +453,12 @@ class GoB_OT_export(Operator):
                 if mat.name:
                     material = bpy.data.materials[mat.name]
                     if material.use_nodes:
-                        for node in material.node_tree.nodes:
+                        #print("material:", mat.name, "using nodes \n")
+                        for node in material.node_tree.nodes:	
+                            #print("node: ", node.type)                                
                             if node.type in {'TEX_IMAGE'} and node.image:
-                                if (utils.prefs().import_diffuse_suffix) in node.image.name:
+                                #print("IMAGES: ", node.image.name, node.image)	
+                                if (utils.prefs().import_diffuse_suffix) in node.image.name:                                
                                     diff_texture = node.image
                                 if (utils.prefs().import_displace_suffix) in node.image.name:
                                     disp_texture = node.image
@@ -525,6 +468,7 @@ class GoB_OT_export(Operator):
                                 print("group found")
             user_file_fomrat = scn.render.image_settings.file_format
             scn.render.image_settings.file_format = 'BMP'
+            #fileExt = ('.' + utils.prefs().texture_format.lower())
             fileExt = '.bmp'
 
             if diff_texture:
@@ -538,8 +482,8 @@ class GoB_OT_export(Operator):
                 goz_file.write(pack('<4B', 0xc9, 0xaf, 0x00, 0x00))
                 goz_file.write(pack('<I', len(name)+16))
                 goz_file.write(pack('<Q', 1))
-                goz_file.write(pack('%ss' % len(name), name))
-                if utils.prefs().performance_profiling:
+                goz_file.write(pack('%ss' % len(name), name))                
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "Write diff_texture")
 
             if disp_texture:
@@ -553,80 +497,101 @@ class GoB_OT_export(Operator):
                 goz_file.write(pack('<4B', 0xd9, 0xd6, 0x00, 0x00))
                 goz_file.write(pack('<I', len(name)+16))
                 goz_file.write(pack('<Q', 1))
-                goz_file.write(pack('%ss' % len(name), name))
-                if utils.prefs().performance_profiling:
+                goz_file.write(pack('%ss' % len(name), name))                
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "Write disp_texture")
 
             if norm_texture:
-                name = PATH_PROJECT + obj.name + utils.prefs().import_normal_suffix + fileExt
+                name = PATH_PROJECT + obj.name + utils.prefs().import_normal_suffix + fileExt                
                 try:
                     norm_texture.save_render(name)
-                    print(name)
+                    print(name)                
                 except Exception as e:
                     print(e)
                 name = name.encode('utf8')
                 goz_file.write(pack('<4B', 0x51, 0xc3, 0x00, 0x00))
                 goz_file.write(pack('<I', len(name)+16))
                 goz_file.write(pack('<Q', 1))
-                goz_file.write(pack('%ss' % len(name), name))
-                if utils.prefs().performance_profiling:
+                goz_file.write(pack('%ss' % len(name), name))                
+                if utils.prefs().performance_profiling: 
                     start_time = utils.profiler(start_time, "Write norm_texture")
             # end
             goz_file.write(pack('16x'))
 
-            if utils.prefs().performance_profiling:
+            if utils.prefs().performance_profiling: 
                 utils.profiler(start_time, "Write Textures")
                 print(30*"-")
                 utils.profiler(start_total_time, "Total Export Time")
                 print(30*"=")
 
         bpy.data.meshes.remove(mesh_tmp)
-        # restore user file format
+        #restore user file format
         scn.render.image_settings.file_format = user_file_fomrat
         return
 
-    def execute(self, context):
+    def execute(self, context): 
+       
+        if utils.prefs().custom_pixologoc_path:
+            paths.PATH_GOZ =  utils.prefs().pixologoc_path  
 
-        paths.set_goz_path_from_preferences()
+        PATH_PROJECT = utils.prefs().project_path
 
-        PATH_PROJECT = utils.get_project_path()
-
-        try:
+        #setup GoZ configuration
+        #if not os.path.isfile(f"{paths.PATH_GOZ}/GoZApps/Blender/GoZ_Info.txt"):  
+        try:    #install in GoZApps if missing     
             source_GoZ_Info = os.path.join(paths.PATH_GOB, "Blender")
             target_GoZ_Info = os.path.join(paths.PATH_GOZ, "GoZApps", "Blender")
             print(source_GoZ_Info, target_GoZ_Info)
-            shutil.copytree(source_GoZ_Info, target_GoZ_Info, symlinks=True)
-        except FileExistsError:
+            shutil.copytree(source_GoZ_Info, target_GoZ_Info, symlinks=True)            
+        except FileExistsError: #if blender folder is found update the info file
             source_GoZ_Info = os.path.join(paths.PATH_GOB, "Blender", "GoZ_Info.txt")
             target_GoZ_Info = os.path.join(paths.PATH_GOZ, "GoZApps", "Blender", "GoZ_Info.txt")
-            shutil.copy2(source_GoZ_Info, target_GoZ_Info)
+            shutil.copy2(source_GoZ_Info, target_GoZ_Info)  
 
+            #write blender path to GoZ configuration
+            #if not os.path.isfile(f"{paths.PATH_GOZ}/GoZApps/Blender/GoZ_Config.txt"): 
             with open(os.path.join(paths.PATH_GOZ, "GoZApps", "Blender", "GoZ_Config.txt"), 'wt') as GoB_Config:
                 blender_path = os.path.join(paths.PATH_BLENDER).replace('\\', '/')
                 GoB_Config.write(f'PATH = "{blender_path}"')
+            #specify GoZ application
             with open(os.path.join(paths.PATH_GOZ, "GoZBrush", "GoZ_Application.txt"), 'wt') as GoZ_Application:
-                GoZ_Application.write("Blender")
+                GoZ_Application.write("Blender")   
 
         except Exception as e:
             print(e)
 
+        #update project path
+        #print("Project file path: ", f"{paths.PATH_GOZ}/GoZBrush/GoZ_ProjectPath.txt")
         with open(os.path.join(paths.PATH_GOZ, "GoZBrush", "GoZ_ProjectPath.txt"), 'wt') as GoZ_Application:
-            GoZ_Application.write(PATH_PROJECT)
+            GoZ_Application.write(PATH_PROJECT) 
 
+        # remove ZTL files since they mess up Zbrush importing subtools
         if utils.prefs().clean_project_path:
             for file_name in os.listdir(PATH_PROJECT):
+                #print(file_name)
                 if file_name.lower().endswith(('.goz', '.ztn', '.ztl')):
                     print('cleaning file:', file_name)
                     os.remove(os.path.join(PATH_PROJECT, file_name))
 
+        """
+        # a object can either be imported as tool or as subtool in zbrush
+        # the IMPORT_AS_SUBTOOL needs to be changed in ../Pixologic/GoZBrush/GoZ_Config.txt 
+        # for zbrush to recognize the import mode   
+            GoZ_Config.txt
+                PATH = "C:/PROGRAM FILES/PIXOLOGIC/ZBRUSH 2021/ZBrush.exe"
+                IMPORT_AS_SUBTOOL = TRUE
+                SHOW_HELP_WINDOW = TRUE 
+        """
         import_as_subtool = 'IMPORT_AS_SUBTOOL = TRUE'
-        import_as_tool = 'IMPORT_AS_SUBTOOL = FALSE'
+        import_as_tool = 'IMPORT_AS_SUBTOOL = FALSE'  
 
         try:
             with open(paths.PATH_CONFIG) as r:
-                r = r.read().replace('\t', ' ')
+                # IMPORT AS SUBTOOL
+                r = r.read().replace('\t', ' ') #fix indentations in source data
                 if self.as_tool:
                     new_config = r.replace(import_as_subtool, import_as_tool)
+                # IMPORT AS TOOL
                 else:
                     new_config = r.replace(import_as_tool, import_as_subtool)
 
@@ -634,15 +599,18 @@ class GoB_OT_export(Operator):
                 w.write(new_config)
 
         except Exception as e:
-            print("Goz config missing, writing file ", e)
+            print("Goz config missing, writing file ", e)         
+            #write blender path to GoZ configuration
+            #if not os.path.isfile(f"{paths.PATH_GOZ}/GoZApps/Blender/GoZ_Config.txt"): 
             with open(os.path.join(paths.PATH_GOZ, "GoZApps", "Blender", "GoZ_Config.txt"), 'wt') as GoB_Config:
-                GoB_Config.write(f"PATH = \'{paths.PATH_BLENDER}\'")
+                GoB_Config.write(f"PATH = \'{paths.PATH_BLENDER}\'")   
+
 
         currentContext = None
-        if context.object:
+        if context.object:            
             currentContext = context.object.mode
-            if context.object.mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
+            if context.object.mode != 'OBJECT':        
+                bpy.ops.object.mode_set(mode='OBJECT')         
 
         wm = context.window_manager
         wm.progress_begin(0,100)
@@ -653,8 +621,30 @@ class GoB_OT_export(Operator):
             for i, obj in enumerate(context.selected_objects):
                 if obj.type in surface_types:
 
+                    """ 
+                    # Avoid annoying None checks later on.
+                    if obj.type not in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META'}:
+                        self.report({'INFO'}, "Object can not be converted to mesh")
+                        return {'CANCELLED'}
+                        
+                    depsgraph = context.evaluated_depsgraph_get()
+                    # Invoke to_mesh() for original object.
+                    mesh_from_orig = obj.to_mesh()
+                    self.report({'INFO'}, f"{len(mesh_from_orig.vertices)} in new mesh without modifiers.")
+
+                    # Remove temporary mesh.
+                    obj.to_mesh_clear()
+                    # Invoke to_mesh() for evaluated object.
+                    object_eval = obj.evaluated_get(depsgraph)
+                    mesh_from_eval = object_eval.to_mesh()
+                    self.report({'INFO'}, f"{len(mesh_from_eval.vertices)} in new mesh with modifiers.")
+                    # Remove temporary mesh.
+                    object_eval.to_mesh_clear() 
+                    #"""
+
                     depsgraph = context.evaluated_depsgraph_get()
                     obj_to_convert = obj.evaluated_get(depsgraph)
+                    #mesh_tmp = obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph) 
                     mesh_tmp = bpy.data.meshes.new_from_object(obj_to_convert)
                     mesh_tmp.transform(obj.matrix_world)
                     obj_tmp = bpy.data.objects.new(f'{obj.name}_{obj.type}', mesh_tmp)
@@ -668,25 +658,27 @@ class GoB_OT_export(Operator):
                         self.exportGoZ(context.scene, obj_tmp, f'{PATH_PROJECT}')
                         with open( f"{PATH_PROJECT}{obj_tmp.name}.ztn", 'wt') as ztn:
                             ztn.write(f'{PATH_PROJECT}{obj_tmp.name}')
-                        GoZ_ObjectList.write(f'{PATH_PROJECT}{obj_tmp.name}\n')
+                        GoZ_ObjectList.write(f'{PATH_PROJECT}{obj_tmp.name}\n')                        
+                        #cleanup temp mesh
                         bpy.data.meshes.remove(mesh_tmp)
 
                 elif obj.type in {'MESH'}:
-                    depsgraph = bpy.context.evaluated_depsgraph_get()
+                    depsgraph = bpy.context.evaluated_depsgraph_get() 
 
+                    # if one or less objects check amount of faces, 0 faces will crash zbrush
                     if utils.prefs().export_modifiers != 'IGNORE':
                         object_eval = obj.evaluated_get(depsgraph)
                         numFaces = len(object_eval.data.polygons)
-                    else:
+                    else: 
                         numFaces = len(obj.data.polygons)
 
-                    if numFaces > 0:
-                        geometry.process_linked_objects(obj)
+                    if numFaces > 0: 
+                        geometry.process_linked_objects(obj) 
                         geometry.remove_internal_faces(obj)
 
                         if bpy.ops.geometry.color_attribute_convert.poll():
                             bpy.ops.geometry.color_attribute_convert(domain='POINT', data_type='FLOAT_COLOR')
-                            obj.data.update()
+                            obj.data.update()  # Force mesh data update
 
                         self.escape_object_name(obj)
                         self.exportGoZ(context.scene, obj, f'{PATH_PROJECT}')
@@ -694,10 +686,11 @@ class GoB_OT_export(Operator):
                             ztn.write(f'{PATH_PROJECT}{obj.name}')
                         GoZ_ObjectList.write(f'{PATH_PROJECT}{obj.name}\n')
                     else:
-                        ui.ShowReport(self, ["Object: ", obj.name], "GoB: ZBrush can not import objects without faces", 'COLORSET_01_VEC')
+                        ui.ShowReport(self, ["Object: ", obj.name], "GoB: ZBrush can not import objects without faces", 'COLORSET_01_VEC') 
 
                 else:
-                    ui.ShowReport(self, [obj.type, obj.name], "GoB: unsupported obj.type found:", 'COLORSET_01_VEC')
+                    ui.ShowReport(self, [obj.type, obj.name], "GoB: unsupported obj.type found:", 'COLORSET_01_VEC') 
+                    #print("GoB: unsupported obj.type found:", obj.type, obj.name)
 
                 wm.progress_update(step * i)
             wm.progress_end()
@@ -707,50 +700,52 @@ class GoB_OT_export(Operator):
         except Exception as e:
             print(e)
 
-        if not paths.is_file_empty(paths.PATH_OBJLIST):
+        # only run if PATH_OBJLIST file file is not empty, else zbrush errors
+        if not paths.is_file_empty(paths.PATH_OBJLIST): 
             path_exists = paths.find_zbrush(self, context, paths.isMacOS)
             if utils.prefs().export_run_zbrush:
                 if not path_exists:
                     bpy.ops.gob.search_zbrush('INVOKE_DEFAULT')
                 else:
-                    zbrush_exec = utils.get_zbrush_exec()
-                    paths.deploy_zfileutils(zbrush_exec)
-                    launch_script = paths.get_launch_script()
-                    if not os.path.isfile(launch_script):
-                        ui.ShowReport(
-                            self,
-                            [launch_script],
-                            "GoB: missing GoB_Import zscript",
-                            'COLORSET_01_VEC',
-                        )
-                    elif paths.isMacOS:
-                        print("OSX Popen: ", zbrush_exec, launch_script)
-                        Popen(['open', '-a', zbrush_exec, launch_script])
-                    else:
-                        print("Windows Popen: ", zbrush_exec, launch_script)
-                        Popen([zbrush_exec, launch_script])
-
-        if context.object and currentContext:
-            bpy.ops.object.mode_set(mode=currentContext)
+                    if paths.isMacOS:   
+                        print("OSX Popen: ", utils.prefs().zbrush_exec)
+                        Popen(['open', '-a', utils.prefs().zbrush_exec, paths.PATH_SCRIPT])   
+                    else: #windows   
+                        print("Windows Popen: ", utils.prefs().zbrush_exec)
+                        Popen([utils.prefs().zbrush_exec, paths.PATH_SCRIPT], shell=True)  
+        
+        # restore object context
+        if context.object and currentContext: 
+            bpy.ops.object.mode_set(mode=currentContext) 
 
         return {'FINISHED'}
 
+
     def escape_object_name(self, obj):
+        """
+        Escape object name so it can be used as a valid file name.
+        Keep only alphanumeric characters, underscore, dash and dot, and replace other characters with an underscore.
+        Multiple consecutive invalid characters will be replaced with just a single underscore character.
+        """        
         import re
-
-        original_name = obj.name
-        new_name = re.sub(r'[^A-Za-z0-9_-]+', '_', original_name)
-        new_name = re.sub(r'_+', '_', new_name).strip('_-')
-
-        if not new_name:
-            new_name = "Object"
-
-        if new_name == original_name:
-            return
-
-        base_name = new_name
+        suffix_pattern = '\.(.*)'
+        found_string = re.search(suffix_pattern, obj.name)   
+        new_name = obj.name
+        if found_string:
+            # suffixes in zbrush longer than 1 symbol after a . (dot) require a specal addition 
+            # of symbol+underline to be exported from zbrush, otherwise the whole suffix gets removed.
+            # Due to the complicated name that this would create, only the . (dot) for one symbol suffix are kept, 
+            # the others are going to be replaced by a _ (underline) resulting from .001 to _001
+            if len(found_string.group()) > 2:              
+                new_name = re.sub('[^\w\_\-]+', '_', obj.name)
+            else:
+                return       
+        
+        if new_name == obj.name:
+            return            
         i = 0
-        while new_name in bpy.data.objects and bpy.data.objects[new_name] != obj:
-            new_name = f"{base_name}_{i:02d}"
-            i += 1
+        while new_name in bpy.data.objects.keys(): #while name collision with other scene objs,
+            name_cut = None if i == 0 else -2  #in first loop, do not slice name.
+            new_name = new_name[:name_cut] + str(i).zfill(2) #add two latters to end of obj name.
+            i += 1          
         obj.name = new_name
