@@ -310,33 +310,74 @@ class GoB_OT_export(Operator):
                     start_time = utils.profiler(start_time, "Write Polypaint")
 
             # --Mask--
-            if not utils.prefs().export_clear_mask:
-                # since blender 4.1, Sculpt mask values are stored in a generic attribute
-                # https://developer.blender.org/docs/release_notes/4.1/python_api/#mesh
-                if '.sculpt_mask' in obj.data.attributes and bpy.app.version >= (4, 1, 0):
-                    goz_file.write(pack('<4B', 0x32, 0x75, 0x00, 0x00))
-                    goz_file.write(pack('<I', numVertices*2+16))
-                    goz_file.write(pack('<Q', numVertices))
+            # --Mask--
+            export_mask = utils.prefs().export_mask
 
-                    mask_data = np.zeros(numVertices, dtype=np.float32)
-                    obj.data.attributes['.sculpt_mask'].data.foreach_get('value', mask_data)
-                    mask_values = ((1.0 - mask_data) * 65535).astype(np.uint16)
+            if export_mask != "NONE":
 
-                    goz_file.write(pack(f'<{numVertices}H', *mask_values))
+                # ---------------------------------------------------------
+                # Sculpt Mode Mask
+                # ---------------------------------------------------------
+                if export_mask == "SCULPT_MASK":
 
-                else:
-                    for vertexGroup in obj.vertex_groups:
-                        if vertexGroup.name.lower() in {'mask'}:
-                            goz_file.write(pack('<4B', 0x32, 0x75, 0x00, 0x00))
-                            goz_file.write(pack('<I', numVertices*2+16))
-                            goz_file.write(pack('<Q', numVertices))
+                    # Blender 4.1+ stores sculpt masks as a generic attribute
+                    if (
+                        bpy.app.version >= (4, 1, 0)
+                        and ".sculpt_mask" in mesh_tmp.attributes
+                    ):
+
+                        goz_file.write(pack("<4B", 0x32, 0x75, 0x00, 0x00))
+                        goz_file.write(pack("<I", numVertices * 2 + 16))
+                        goz_file.write(pack("<Q", numVertices))
+
+                        mask_data = np.zeros(numVertices, dtype=np.float32)
+
+                        mesh_tmp.attributes[".sculpt_mask"].data.foreach_get(
+                            "value", mask_data
+                        )
+
+                        # Blender mask:
+                        # 0.0 = unmasked
+                        # 1.0 = fully masked
+                        #
+                        # GoZ expects:
+                        # 65535 = unmasked
+                        # 0     = fully masked
+
+                        mask_values = ((1.0 - mask_data) * 65535).astype(np.uint16)
+
+                        goz_file.write(pack(f"<{numVertices}H", *mask_values))
+
+                # ---------------------------------------------------------
+                # Vertex Group Mask
+                # ---------------------------------------------------------
+                elif export_mask == "VERTEX_GROUP_MASK":
+
+                    for vertex_group in obj.vertex_groups:
+
+                        if vertex_group.name.lower() == "mask":
+
+                            goz_file.write(pack("<4B", 0x32, 0x75, 0x00, 0x00))
+
+                            goz_file.write(pack("<I", numVertices * 2 + 16))
+
+                            goz_file.write(pack("<Q", numVertices))
+
+                            mask_values = np.full(numVertices, 65535, dtype=np.uint16)
+
                             for i in range(numVertices):
                                 try:
-                                    goz_file.write(pack('<H', int((1.0 - vertexGroup.weight(i)) * 65535)))
-                                except Exception as e:
-                                    # print("no vertex group: ", e)
-                                    goz_file.write(pack('<H', 65535))
+                                    weight = vertex_group.weight(i)
 
+                                    mask_values[i] = int((1.0 - weight) * 65535)
+
+                                except RuntimeError:
+                                    # Vertex is not part of the vertex group
+                                    mask_values[i] = 65535
+
+                            goz_file.write(mask_values.tobytes())
+
+                            break
             if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "Write Mask")
 
