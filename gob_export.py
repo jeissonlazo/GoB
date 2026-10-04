@@ -310,6 +310,137 @@ class GoB_OT_export(Operator):
                     start_time = utils.profiler(start_time, "Write Polypaint")
 
             # --Mask--
+            export_mask = utils.prefs().export_mask
+
+            debug_log(f"[MASK] export_mask = {export_mask}")
+
+            if export_mask != "NONE":
+
+                # ---------------------------------------------------------
+                # Sculpt Mode Mask
+                # ---------------------------------------------------------
+                if export_mask == "SCULPT_MASK":
+
+                    debug_log("[MASK] Using SCULPT_MASK")
+
+                    has_sculpt_mask = (
+                        bpy.app.version >= (4, 1, 0)
+                        and ".sculpt_mask" in mesh_tmp.attributes
+                    )
+
+                    debug_log(f"[MASK] .sculpt_mask exists = {has_sculpt_mask}")
+
+                    if has_sculpt_mask:
+
+                        try:
+                            debug_log("[MASK] Reading sculpt mask")
+
+                            goz_file.write(pack("<4B", 0x32, 0x75, 0x00, 0x00))
+
+                            goz_file.write(pack("<I", numVertices * 2 + 16))
+
+                            goz_file.write(pack("<Q", numVertices))
+
+                            mask_data = np.zeros(numVertices, dtype=np.float32)
+
+                            mesh_tmp.attributes[".sculpt_mask"].data.foreach_get(
+                                "value", mask_data
+                            )
+
+                            debug_log(
+                                f"[MASK] Mask data read successfully "
+                                f"(vertices={numVertices}, "
+                                f"min={mask_data.min()}, "
+                                f"max={mask_data.max()})"
+                            )
+
+                            # Blender:
+                            # 0.0 = unmasked
+                            # 1.0 = fully masked
+                            #
+                            # GoZ:
+                            # 65535 = unmasked
+                            # 0     = fully masked
+
+                            mask_values = ((1.0 - mask_data) * 65535).astype(np.uint16)
+
+                            goz_file.write(pack(f"<{numVertices}H", *mask_values))
+
+                            debug_log("[MASK] Sculpt mask written successfully")
+
+                        except Exception as e:
+
+                            debug_log(f"[MASK ERROR] {type(e).__name__}: {e}")
+
+                            debug_log(traceback.format_exc())
+
+                            raise
+
+                    else:
+                        debug_log("[MASK] WARNING: .sculpt_mask not found")
+
+                # ---------------------------------------------------------
+                # Vertex Group Mask
+                # ---------------------------------------------------------
+                elif export_mask == "VERTEX_GROUP_MASK":
+
+                    debug_log("[MASK] Using VERTEX_GROUP_MASK")
+
+                    mask_found = False
+
+                    for vertex_group in obj.vertex_groups:
+
+                        debug_log(f"[MASK] Vertex group found: {vertex_group.name}")
+
+                        if vertex_group.name.lower() == "mask":
+
+                            mask_found = True
+
+                            debug_log("[MASK] Mask vertex group found")
+
+                            try:
+
+                                goz_file.write(pack("<4B", 0x32, 0x75, 0x00, 0x00))
+
+                                goz_file.write(pack("<I", numVertices * 2 + 16))
+
+                                goz_file.write(pack("<Q", numVertices))
+
+                                mask_values = np.full(
+                                    numVertices, 65535, dtype=np.uint16
+                                )
+
+                                for i in range(numVertices):
+
+                                    try:
+                                        weight = vertex_group.weight(i)
+
+                                        mask_values[i] = int((1.0 - weight) * 65535)
+
+                                    except RuntimeError:
+                                        mask_values[i] = 65535
+
+                                goz_file.write(mask_values.tobytes())
+
+                                debug_log(
+                                    "[MASK] Vertex group mask written successfully"
+                                )
+
+                            except Exception as e:
+
+                                debug_log(f"[MASK ERROR] {type(e).__name__}: {e}")
+
+                                debug_log(traceback.format_exc())
+
+                                raise
+
+                            break
+
+                    if not mask_found:
+                        debug_log("[MASK] WARNING: Vertex group 'Mask' not found")
+
+            else:
+                debug_log("[MASK] Mask export disabled")
 
             if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "Write Mask")
