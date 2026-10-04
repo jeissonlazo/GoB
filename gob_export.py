@@ -27,6 +27,22 @@ from bpy.types import Operator
 from bpy.props import BoolProperty
 from . import paths, utils, geometry, ui, gob_import
 
+import traceback
+
+DEBUG_LOG = os.path.join(os.path.dirname(__file__), "gob_debug.log")
+
+
+def debug_log(message):
+    message = str(message)
+
+    print(f"[GoB DEBUG] {message}")
+
+    try:
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(message + "\n")
+    except Exception:
+        pass
+
 
 class GoB_OT_export(Operator):
     bl_idname = "scene.gob_export"
