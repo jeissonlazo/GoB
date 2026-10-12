@@ -832,15 +832,21 @@ class GoB_OT_export(Operator):
                 else:
                     if paths.isMacOS:   
                         print("OSX Popen: ", utils.prefs().zbrush_exec)
-                        Popen(['open', '-a', utils.prefs().zbrush_exec, paths.PATH_SCRIPT])   
+                        Popen(['open', '-a', utils.prefs().zbrush_exec, paths.get_launch_script()])
                     else: #windows   
-                        print("Windows Popen: ", utils.prefs().zbrush_exec)
+                        zbrush_exec = os.path.expandvars(
+                            os.path.expanduser(
+                                utils.prefs().zbrush_exec.strip().strip('"')
+                            )
+                        )
+                        launch_script = os.path.abspath(paths.get_launch_script())
+                        print("Windows Popen: ", zbrush_exec)
                         # Pass the import script directly to ZBrush. With
                         # ``shell=True`` on Windows, extra sequence items are
                         # arguments to the command shell rather than reliably
                         # becoming arguments to ZBrush, so ZBrush can open
                         # without running the GoB import script.
-                        Popen([utils.prefs().zbrush_exec, paths.PATH_SCRIPT])
+                        Popen([zbrush_exec, launch_script])
 
         # restore object context
         if context.object and currentContext: 
