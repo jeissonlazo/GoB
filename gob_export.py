@@ -840,13 +840,24 @@ class GoB_OT_export(Operator):
                             )
                         )
                         launch_script = os.path.abspath(paths.get_launch_script())
-                        print("Windows Popen: ", zbrush_exec)
+                        print("Windows ZBrush executable: ", repr(zbrush_exec))
+                        print("Windows GoB import script: ", repr(launch_script))
+                        if not os.path.isfile(zbrush_exec):
+                            raise FileNotFoundError(
+                                f"GoB: ZBrush executable does not exist: {zbrush_exec!r}"
+                            )
+                        if not os.path.isfile(launch_script):
+                            raise FileNotFoundError(
+                                f"GoB: ZBrush import script does not exist: {launch_script!r}"
+                            )
                         # Pass the import script directly to ZBrush. With
                         # ``shell=True`` on Windows, extra sequence items are
                         # arguments to the command shell rather than reliably
                         # becoming arguments to ZBrush, so ZBrush can open
                         # without running the GoB import script.
-                        Popen([zbrush_exec, launch_script])
+                        Popen(
+                            [zbrush_exec, launch_script], executable=zbrush_exec
+                        )
 
         # restore object context
         if context.object and currentContext: 
