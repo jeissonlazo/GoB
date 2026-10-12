@@ -60,7 +60,7 @@ class GoB_OT_export(Operator):
         return geometry.export_poll(cls, context)    
 
     def exportGoZ(self, scn, obj, path_export):      
-        PATH_PROJECT = utils.prefs().project_path
+        PATH_PROJECT = utils.get_project_path()
         if utils.prefs().performance_profiling: 
             print("\n", 100*"=")
             start_time = utils.profiler(time.perf_counter(), "Export Profiling: " + obj.name)
@@ -133,7 +133,7 @@ class GoB_OT_export(Operator):
 
             # 6: Project Path
             GoBVars.write(pack('<2B',0x00, 0x53))   #.S
-            name = utils.prefs().project_path
+            name = utils.get_project_path()
             GoBVars.write(name.encode('utf-8')) 
             if utils.prefs().performance_profiling: 
                 start_time = utils.profiler(start_time, "    variablesFile: Write Project Path")
@@ -655,10 +655,9 @@ class GoB_OT_export(Operator):
 
     def execute(self, context): 
 
-        if utils.prefs().custom_pixologoc_path:
-            paths.PATH_GOZ =  utils.prefs().pixologoc_path  
+        paths.set_goz_path_from_preferences()
 
-        PATH_PROJECT = utils.prefs().project_path
+        PATH_PROJECT = utils.get_project_path()
 
         # setup GoZ configuration
         # if not os.path.isfile(f"{paths.PATH_GOZ}/GoZApps/Blender/GoZ_Info.txt"):
@@ -833,6 +832,7 @@ class GoB_OT_export(Operator):
                     if paths.isMacOS:   
                         zbrush_exec = utils.get_zbrush_exec()
                         print("OSX Popen: ", zbrush_exec)
+                        paths.deploy_zfileutils(zbrush_exec)
                         Popen(['open', '-a', zbrush_exec, paths.get_launch_script()])
                     else: #windows   
                         zbrush_exec = os.path.expandvars(
@@ -851,6 +851,9 @@ class GoB_OT_export(Operator):
                             raise FileNotFoundError(
                                 f"GoB: ZBrush import script does not exist: {launch_script!r}"
                             )
+                        # ZBrush 2026+ loads ZFileUtils from its user plugin
+                        # directory. Deploy it before running the import script.
+                        paths.deploy_zfileutils(zbrush_exec)
                         # Pass the import script directly to ZBrush. With
                         # ``shell=True`` on Windows, extra sequence items are
                         # arguments to the command shell rather than reliably
