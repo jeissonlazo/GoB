@@ -831,12 +831,13 @@ class GoB_OT_export(Operator):
                     bpy.ops.gob.search_zbrush('INVOKE_DEFAULT')
                 else:
                     if paths.isMacOS:   
-                        print("OSX Popen: ", utils.prefs().zbrush_exec)
-                        Popen(['open', '-a', utils.prefs().zbrush_exec, paths.get_launch_script()])
+                        zbrush_exec = utils.get_zbrush_exec()
+                        print("OSX Popen: ", zbrush_exec)
+                        Popen(['open', '-a', zbrush_exec, paths.get_launch_script()])
                     else: #windows   
                         zbrush_exec = os.path.expandvars(
                             os.path.expanduser(
-                                utils.prefs().zbrush_exec.strip().strip('"')
+                                utils.get_zbrush_exec().strip().strip('"')
                             )
                         )
                         launch_script = os.path.abspath(paths.get_launch_script())
