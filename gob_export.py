@@ -835,7 +835,12 @@ class GoB_OT_export(Operator):
                         Popen(['open', '-a', utils.prefs().zbrush_exec, paths.PATH_SCRIPT])   
                     else: #windows   
                         print("Windows Popen: ", utils.prefs().zbrush_exec)
-                        Popen([utils.prefs().zbrush_exec, paths.PATH_SCRIPT], shell=True)  
+                        # Pass the import script directly to ZBrush. With
+                        # ``shell=True`` on Windows, extra sequence items are
+                        # arguments to the command shell rather than reliably
+                        # becoming arguments to ZBrush, so ZBrush can open
+                        # without running the GoB import script.
+                        Popen([utils.prefs().zbrush_exec, paths.PATH_SCRIPT])
 
         # restore object context
         if context.object and currentContext: 
